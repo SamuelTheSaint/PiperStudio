@@ -1,0 +1,11 @@
+*.exe
+*.onnx
+*.onnx.json
+*.ini
+PiperStudio_lasttext.txt
+replacements.txt
+Exports/
+voices/
+espeak-ng-data/
+*.dll
+*.ort

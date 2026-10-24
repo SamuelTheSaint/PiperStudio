@@ -1,0 +1,44 @@
+THIRD-PARTY NOTICES — Piper Studio package
+==========================================
+
+Piper Studio itself is MIT-licensed (LICENSE.txt). This package also contains
+the following separate programs and data, each under its own license. They are
+included unmodified.
+
+1. Piper text-to-speech engine (piper.exe, piper_phonemize.dll)
+   Copyright (c) Michael Hansen and contributors — MIT License
+   Source: https://github.com/rhasspy/piper
+   Binary release used: 2023.11.14-2 (piper_windows_amd64.zip)
+
+2. eSpeak NG (espeak-ng.dll, espeak-ng-data folder)
+   GNU General Public License v3.0 or later
+   Source code: https://github.com/espeak-ng/espeak-ng
+   (The version bundled with Piper: https://github.com/rhasspy/espeak-ng)
+   License text: https://www.gnu.org/licenses/gpl-3.0.txt
+
+3. ONNX Runtime (onnxruntime.dll, onnxruntime_providers_shared.dll)
+   Copyright (c) Microsoft Corporation — MIT License
+   Source: https://github.com/microsoft/onnxruntime
+
+4. libtashkeel model (libtashkeel_model.ort) — MIT License
+   Source: https://github.com/mush42/libtashkeel
+
+5. Voice: fa_IR-amir-medium (voices folder)
+   Model: https://huggingface.co/rhasspy/piper-voices/tree/main/fa/fa_IR/amir
+   Training data: https://datacula.com/tts-databases — License: CC0
+   Fine-tuned from the en_US lessac voice.
+
+6. Voice: en_US-ryan-high (voices folder)
+   Model: https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/ryan/high
+   Training data: RyanSpeech — https://www.kaggle.com/datasets/roholazandie/ryanspeech
+   License: CC BY-NC-SA 4.0 (attribution, NON-COMMERCIAL, share-alike)
+   https://creativecommons.org/licenses/by-nc-sa/4.0/
+   → Because of this voice, the package must not be sold or used commercially.
+
+7. FFmpeg (ffmpeg.exe) — only if included in this package
+   FFmpeg is licensed under the LGPL/GPL depending on the build.
+   Source code and license: https://ffmpeg.org/legal.html
+   Windows builds: https://www.gyan.dev/ffmpeg/builds/ or https://github.com/BtbN/FFmpeg-Builds
+
+Not included, but used if you install it:
+   VB-CABLE virtual audio device (donationware) — https://vb-audio.com/Cable/
