@@ -82,6 +82,78 @@ namespace PiperStudio
             return new Project { Rate = Rate, DuckAttack = DuckAttack, DuckRelease = DuckRelease, DuckBridge = DuckBridge, Tracks = Tracks.Select(t => t.Clone()).ToList() };
         }
 
+        // ------------------------------------------------ crossfades
+        // Where two clips on the same track overlap, the first fades out while the second fades in.
+        public void EffectiveFades(Track t, Clip c, out long fadeIn, out long fadeOut)
+        {
+            fadeIn = (long)(c.FadeIn * Rate); fadeOut = (long)(c.FadeOut * Rate);
+            foreach (var d in t.Clips)
+            {
+                if (d == c) continue;
+                if (d.Start < c.Start && d.End > c.Start && d.End < c.End) fadeIn = Math.Max(fadeIn, d.End - c.Start);
+                if (d.Start > c.Start && d.Start < c.End && d.End > c.End) fadeOut = Math.Max(fadeOut, c.End - d.Start);
+            }
+            fadeIn = Math.Min(fadeIn, c.Length); fadeOut = Math.Min(fadeOut, c.Length);
+        }
+
+        // ------------------------------------------------ time-range editing (all tracks)
+        // Removes [a, b) from every track and moves everything after it to the left ("ripple delete").
+        public void DeleteRange(long a, long b) { CutRange(a, b, true); }
+        // Makes [a, b) silent on every track, without moving anything.
+        public void SilenceRange(long a, long b) { CutRange(a, b, false); }
+
+        void CutRange(long a, long b, bool ripple)
+        {
+            if (b <= a) return;
+            long gap = b - a;
+            const double edgeFade = 0.005;    // 5 ms at cut edges, so there's no click
+            foreach (var t in Tracks)
+            {
+                var result = new List<Clip>();
+                foreach (var c in t.Clips)
+                {
+                    if (c.End <= a) { result.Add(c); continue; }
+                    if (c.Start >= b) { if (ripple) c.Start -= gap; result.Add(c); continue; }
+                    if (c.Start < a)    // keep the part before the range
+                    {
+                        var left = c.Clone();
+                        left.Out = c.In + (a - c.Start);
+                        left.FadeOut = Math.Max(edgeFade, Math.Min(c.FadeOut, left.Length / (double)Rate));
+                        result.Add(left);
+                    }
+                    if (c.End > b)      // keep the part after the range
+                    {
+                        var right = c.Clone();
+                        right.In = c.In + (b - c.Start);
+                        right.Start = ripple ? a : b;
+                        right.FadeIn = Math.Max(edgeFade, Math.Min(c.FadeIn, right.Length / (double)Rate));
+                        result.Add(right);
+                    }
+                }
+                t.Clips = result;
+            }
+        }
+
+        // Splits every clip that crosses the given time.
+        public int SplitAll(long at)
+        {
+            int n = 0;
+            foreach (var t in Tracks)
+            {
+                var add = new List<Clip>();
+                foreach (var c in t.Clips)
+                    if (at > c.Start + Rate / 100 && at < c.End - Rate / 100)
+                    {
+                        var right = c.Clone();
+                        right.In = c.In + (at - c.Start); right.Start = at; right.FadeIn = 0;
+                        c.Out = right.In; c.FadeOut = 0;
+                        add.Add(right); n++;
+                    }
+                t.Clips.AddRange(add);
+            }
+            return n;
+        }
+
         public bool Audible(Track t)
         {
             bool anySolo = false;
@@ -164,7 +236,8 @@ namespace PiperStudio
                     long a = Math.Max(from, c.Start), b = Math.Min(from + n, c.End);
                     if (b <= a) continue;
                     long len = c.Length;
-                    long fi = (long)(c.FadeIn * Rate), fo = (long)(c.FadeOut * Rate);
+                    long fi, fo;
+                    EffectiveFades(t, c, out fi, out fo);
                     float g = c.Gain * t.Volume;
                     var dl = c.Data; var dr = c.DataR ?? c.Data;
                     for (long x = a; x < b; x++)
@@ -214,11 +287,41 @@ namespace PiperStudio
         }
 
         // Writes [from, to) as a 16-bit stereo WAV, one second at a time (memory stays small for long projects).
-        public void MixToWav(string path, long from, long to, Track only, Action<double> progress, CancellationToken ct)
+        // Integrated loudness (LUFS) of the stereo mix of [from, to).
+        public double MeasureLoudness(long from, long to, Track only, Action<double> progress, CancellationToken ct)
+        {
+            var ranges = DuckRanges();
+            const int block = 48000;
+            var meter = new LoudnessMeter(Rate, 2);
+            var L = new float[block]; var R = new float[block];
+            long total = Math.Max(1, to - from);
+            for (long pos = from; pos < to; pos += block)
+            {
+                ct.ThrowIfCancellationRequested();
+                int n = (int)Math.Min(block, to - pos);
+                MixInto(pos, n, L, R, only, ranges);
+                meter.Add(new[] { L, R }, n);
+                if (progress != null) progress((pos - from + n) / (double)total);
+            }
+            return meter.Integrated();
+        }
+
+        // targetLufs = NaN: no loudness normalizing. Otherwise the mix is measured first, then written
+        // with the gain that reaches the target, through a -1 dBFS peak limiter.
+        public void MixToWav(string path, long from, long to, Track only, Action<double> progress, CancellationToken ct, double targetLufs = double.NaN)
         {
             var ranges = DuckRanges();
             const int block = 48000;
             long total = Math.Max(0, to - from);
+            float gain = 1; Limiter lim = null;
+            if (!double.IsNaN(targetLufs))
+            {
+                double m = MeasureLoudness(from, to, only, progress == null ? (Action<double>)null : f => progress(f * 0.4), ct);
+                gain = (float)Loudness.GainFor(m, targetLufs);
+                lim = new Limiter(Rate, 2, -1);
+                var inner = progress; if (inner != null) progress = f => inner(0.4 + 0.6 * f);
+            }
+            int lat = lim != null ? lim.Latency : 0;
             using (var fs = File.Create(path))
             {
                 var w = new BinaryWriter(fs);
@@ -229,19 +332,29 @@ namespace PiperStudio
                 w.Write(Encoding.ASCII.GetBytes("data")); w.Write((int)Math.Min(int.MaxValue, dataBytes));
                 var L = new float[block]; var R = new float[block];
                 var buf = new byte[block * 4];
-                for (long pos = from; pos < to; pos += block)
+                int skip = lat;   // the limiter delays its output: drop that much at the start, add it at the end
+                for (long pos = from; pos < to + lat; pos += block)
                 {
                     ct.ThrowIfCancellationRequested();
-                    int n = (int)Math.Min(block, to - pos);
-                    MixInto(pos, n, L, R, only, ranges);
-                    for (int i = 0; i < n; i++)
+                    int n = (int)Math.Min(block, to + lat - pos);
+                    int real = (int)Math.Max(0, Math.Min(n, to - pos));
+                    if (real > 0) MixInto(pos, real, L, R, only, ranges);
+                    for (int i = real; i < n; i++) { L[i] = 0; R[i] = 0; }
+                    if (lim != null)
+                    {
+                        for (int i = 0; i < n; i++) { L[i] *= gain; R[i] *= gain; }
+                        lim.Process(new[] { L, R }, n);
+                    }
+                    int o = 0;
+                    for (int i = skip; i < n; i++, o++)
                     {
                         short l = Clip16(L[i]), r = Clip16(R[i]);
-                        buf[4 * i] = (byte)l; buf[4 * i + 1] = (byte)(l >> 8);
-                        buf[4 * i + 2] = (byte)r; buf[4 * i + 3] = (byte)(r >> 8);
+                        buf[4 * o] = (byte)l; buf[4 * o + 1] = (byte)(l >> 8);
+                        buf[4 * o + 2] = (byte)r; buf[4 * o + 3] = (byte)(r >> 8);
                     }
-                    w.Write(buf, 0, n * 4);
-                    if (progress != null && total > 0) progress((pos - from + n) / (double)total);
+                    skip = Math.Max(0, skip - n);
+                    w.Write(buf, 0, o * 4);
+                    if (progress != null && total > 0) progress(Math.Min(1, (pos - from + n) / (double)total));
                 }
                 w.Flush();
             }

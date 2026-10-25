@@ -95,6 +95,7 @@ namespace PiperStudio
         {
             text = (text ?? "").Trim();
             if (text.Length == 0) return;
+            LearnWords(text, source);
             if (history.Count > 0)
             {
                 var last = history[history.Count - 1];

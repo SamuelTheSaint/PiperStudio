@@ -64,7 +64,7 @@ namespace PiperStudio
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             BuildUi();
-            Lang.Apply(this);
+            Lang.Apply(this); PersianUi.Apply(this);
 
             tl.BeforeChange += () => { hist.Push(tl.P); };
             tl.Changed += () => { MarkModified(); };
@@ -110,11 +110,25 @@ namespace PiperStudio
             mFile.DropDownItems.Add(new ToolStripSeparator());
             mFile.DropDownItems.Add(new ToolStripMenuItem("&Import audio (music, sounds)…", null, (s, e) => ImportAudio()) { ShortcutKeys = Keys.Control | Keys.I });
             mFile.DropDownItems.Add(new ToolStripMenuItem("&Export mix…", null, (s, e) => ExportMix()) { ShortcutKeys = Keys.Control | Keys.E });
+            mFile.DropDownItems.Add(new ToolStripMenuItem("Export the se&lected time…", null, (s, e) => ExportSelection()));
             mFile.DropDownItems.Add(new ToolStripMenuItem("Export each &track separately…", null, (s, e) => ExportTracks()));
             mFile.DropDownItems.Add(new ToolStripMenuItem("Export s&ubtitles (.srt)…", null, (s, e) => ExportSubtitles()));
             miSubs = new ToolStripMenuItem("Also save subtitles (.srt) when exporting the mix") { CheckOnClick = true, Checked = host.GetSetting == null || host.GetSetting("tracks_srt") != "0" };
             miSubs.CheckedChanged += (s, e) => { if (host.SetSetting != null) host.SetSetting("tracks_srt", miSubs.Checked ? "1" : "0"); };
             mFile.DropDownItems.Add(miSubs);
+            var mLoud = new ToolStripMenuItem("&Loudness of exported mix");
+            int curL = 0; int.TryParse(host.GetSetting != null ? host.GetSetting("tracks_lufs") ?? "0" : "0", out curL);
+            for (int i = 0; i < Loudness.Targets.Length; i++)
+            {
+                int k = i;
+                var it = new ToolStripMenuItem(Loudness.TargetNames[i]) { Checked = i == curL };
+                it.Click += (s, e) => { foreach (ToolStripMenuItem x in mLoud.DropDownItems) x.Checked = x == it; lufsChoice = k; if (host.SetSetting != null) host.SetSetting("tracks_lufs", k.ToString()); };
+                mLoud.DropDownItems.Add(it);
+            }
+            lufsChoice = Math.Max(0, Math.Min(Loudness.Targets.Length - 1, curL));
+            mLoud.DropDownItems.Add(new ToolStripSeparator());
+            mLoud.DropDownItems.Add(new ToolStripMenuItem("Measure the loudness of the mix", null, (s, e) => MeasureMix()));
+            mFile.DropDownItems.Add(mLoud);
             mFile.DropDownItems.Add(new ToolStripSeparator());
             mFile.DropDownItems.Add(new ToolStripMenuItem("&Close", null, (s, e) => Close()));
             var mEdit = new ToolStripMenuItem("&Edit");
@@ -127,10 +141,21 @@ namespace PiperStudio
             mEdit.DropDownItems.Add(new ToolStripMenuItem("Clip &properties…   (Enter)", null, (s, e) => { if (tl.SelClip != null) EditClip(tl.SelClip); }));
             mEdit.DropDownItems.Add(new ToolStripSeparator());
             mEdit.DropDownItems.Add(new ToolStripMenuItem("&Add track", null, (s, e) => AddTrack(null, true)) { ShortcutKeys = Keys.Control | Keys.T });
+            mEdit.DropDownItems.Add(new ToolStripSeparator());
+            mEdit.DropDownItems.Add(new ToolStripMenuItem("Select a&ll time   (Ctrl+A)", null, (s, e) => SelectAllTime()));
+            mEdit.DropDownItems.Add(new ToolStripMenuItem("Delete the selected time (everything after moves left)   (Del)", null, (s, e) => DeleteRange()));
+            mEdit.DropDownItems.Add(new ToolStripMenuItem("Make the selected time silent", null, (s, e) => SilenceRange()) { ShortcutKeys = Keys.Control | Keys.L });
+            mEdit.DropDownItems.Add(new ToolStripMenuItem("Split all tracks at the selection edges", null, (s, e) => SplitAtRange()));
+            mEdit.DropDownItems.Add(new ToolStripMenuItem("Clear the selection   (Esc)", null, (s, e) => tl.ClearRange()));
             var mView = new ToolStripMenuItem("&View");
             mView.DropDownItems.Add(new ToolStripMenuItem("Zoom &in   (Ctrl + wheel)", null, (s, e) => tl.Zoom(1.5, tl.Width / 2)));
             mView.DropDownItems.Add(new ToolStripMenuItem("Zoom &out", null, (s, e) => tl.Zoom(1 / 1.5, tl.Width / 2)));
             mView.DropDownItems.Add(new ToolStripMenuItem("&Fit project in window", null, (s, e) => tl.ZoomToFit()) { ShortcutKeys = Keys.Control | Keys.F });
+            mView.DropDownItems.Add(new ToolStripSeparator());
+            miSnap = new ToolStripMenuItem("&Snap to clip edges, playhead and selection (hold Alt to drag freely)") { CheckOnClick = true, Checked = host.GetSetting == null || host.GetSetting("tracks_snap") != "0" };
+            miSnap.CheckedChanged += (s, e) => { tl.Snap = miSnap.Checked; if (host.SetSetting != null) host.SetSetting("tracks_snap", miSnap.Checked ? "1" : "0"); if (bSnap != null) bSnap.BackColor = tl.Snap ? Color.FromArgb(255, 230, 140) : SystemColors.Control; };
+            tl.Snap = miSnap.Checked;
+            mView.DropDownItems.Add(miSnap);
             menu.Items.AddRange(new ToolStripItem[] { mFile, mEdit, mView });
 
             // transport + tools bar
@@ -147,6 +172,9 @@ namespace PiperStudio
             bar.Controls.Add(Btn("⧉ Duplicate", "Duplicate the selected clip (Ctrl+D)", (s, e) => Duplicate()));
             bar.Controls.Add(Btn("✕ Delete", "Delete the selected clip (Del)", (s, e) => DeleteClip()));
             bar.Controls.Add(Btn("⚙ Clip…", "Clip volume, fades, text (Enter or double-click)", (s, e) => { if (tl.SelClip != null) EditClip(tl.SelClip); }));
+            bSnap = Btn("🧲 Snap", "Snap clips to edges, the playhead and the selection. Hold Alt while dragging to place freely.", (s, e) => miSnap.Checked = !miSnap.Checked);
+            bSnap.BackColor = tl.Snap ? Color.FromArgb(255, 230, 140) : SystemColors.Control;
+            bar.Controls.Add(bSnap);
             bar.Controls.Add(Sep());
             bar.Controls.Add(Btn("↶", "Undo (Ctrl+Z)", (s, e) => Undo()));
             bar.Controls.Add(Btn("↷", "Redo (Ctrl+Y)", (s, e) => Redo()));
@@ -415,6 +443,16 @@ namespace PiperStudio
             m.Items.Add(Lang.T("Move to a new track"), null, (s, e) => Change(() => { t.Clips.Remove(c); var nt = new Track { Name = Lang.T("Track") + " " + (tl.P.Tracks.Count + 1) }; nt.Clips.Add(c); tl.P.Tracks.Add(nt); tl.SelTrack = nt; }));
             m.Items.Add(Lang.T("Fade in + out (0.5 s)"), null, (s, e) => Change(() => { c.FadeIn = Math.Min(0.5, c.Length / (double)tl.Rate / 3); c.FadeOut = c.FadeIn; }));
             m.Items.Add(Lang.T("Export this clip…"), null, (s, e) => ExportClip(c));
+            var nr = new ToolStripMenuItem(Lang.T("Reduce background noise"));
+            foreach (var lv in new[] { new KeyValuePair<string, double>("Light (6 dB)", 6), new KeyValuePair<string, double>("Medium (12 dB)", 12), new KeyValuePair<string, double>("Strong (20 dB)", 20) })
+            {
+                double db = lv.Value;
+                nr.DropDownItems.Add(Lang.T(lv.Key), null, (s, e) => ReduceNoise(c, db));
+            }
+            nr.DropDownItems.Add(new ToolStripSeparator());
+            nr.DropDownItems.Add(new ToolStripMenuItem(Lang.T("Tip: first select (drag over) a moment with only noise in this clip — it's used as the noise sample.")) { Enabled = false });
+            m.Items.Add(nr);
+            m.Items.Add(Lang.T("Normalize this clip's loudness (−16 LUFS)"), null, (s, e) => NormalizeClip(c));
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add(Lang.T("Delete"), null, (s, e) => { tl.SelClip = c; DeleteClip(); });
             m.Show(tl, pt);
@@ -658,14 +696,15 @@ namespace PiperStudio
         {
             if (rec != null) { ToggleRecord(); return; }
             if (playCts != null) { StopPlayback(); return; }
-            if (tl.Playhead >= tl.P.Length) tl.Playhead = 0;
+            if (!tl.HasRange && tl.Playhead >= tl.P.Length) tl.Playhead = 0;
             StartPlayback();
         }
 
         void StartPlayback()
         {
-            long from = tl.Playhead, to = tl.P.Length;
-            if (to <= from) { SetStatus(Lang.T("Nothing to play here.")); return; }
+            long from = tl.Playhead, to = long.MaxValue;
+            if (tl.HasRange) { from = tl.Playhead >= tl.SelA && tl.Playhead < tl.SelB - tl.Rate / 10 ? tl.Playhead : tl.SelA; to = tl.SelB; }   // Space plays the selection
+            if (Math.Min(to, tl.P.Length) <= from) { SetStatus(Lang.T("Nothing to play here.")); return; }
             StartMixPlayback(from, to);
             bPlay.Text = Lang.T("❚❚ Pause");
         }
@@ -703,7 +742,7 @@ namespace PiperStudio
                         pl.Run(frames =>
                         {
                             var snap = playSnap;
-                            long stop = snap.Length;
+                            long stop = Math.Min(snap.Length, to);
                             if (pos >= stop) return null;
                             int n = (int)Math.Min(frames, stop - pos);
                             if (snap != rangesFor) { ranges = snap.DuckRanges(); rangesFor = snap; }
@@ -715,7 +754,7 @@ namespace PiperStudio
                     else
                     {
                         // test environments without Windows audio
-                        var end = DateTime.Now.AddSeconds((to - from) / (double)rate);
+                        var end = DateTime.Now.AddSeconds((Math.Min(to, playSnap.Length) - from) / (double)rate);
                         while (DateTime.Now < end && !cts.IsCancellationRequested) Thread.Sleep(20);
                     }
                 }
@@ -908,6 +947,9 @@ namespace PiperStudio
             ExportProject(p, null, c.Name, false);
         }
 
+        int lufsChoice;
+        double TargetLufs { get { return Loudness.Targets[Math.Max(0, Math.Min(Loudness.Targets.Length - 1, lufsChoice))]; } }
+
         void ExportProject(Project p, Track only, string name, bool withSubs)
         {
             if (exporting) { SetStatus(Lang.T("Still exporting…")); return; }
@@ -929,7 +971,8 @@ namespace PiperStudio
                     bool stereo = only == null ? p.HasStereo() : (Math.Abs(only.Pan) > 0.001f || only.Clips.Any(k => k.DataR != null));
                     string wav = ext == ".wav" ? path : Path.Combine(Path.GetTempPath(), "piperstudio_" + Guid.NewGuid().ToString("N") + ".wav");
                     int lastPct = -1;
-                    p.MixToWav(wav, 0, p.Length, only, f => { int pct = (int)(f * 100); if (pct != lastPct) { lastPct = pct; UI(() => SetStatus(Lang.T("Exporting…") + " " + pct + "%")); } }, CancellationToken.None);
+                    double target = only == null ? TargetLufs : double.NaN;
+                    p.MixToWav(wav, 0, p.Length, only, f => { int pct = (int)(f * 100); if (pct != lastPct) { lastPct = pct; UI(() => SetStatus(Lang.T("Exporting…") + " " + pct + "%")); } }, CancellationToken.None, target);
                     if (ext != ".wav")
                     {
                         try { Encode(ff, wav, path, stereo); }
@@ -944,13 +987,131 @@ namespace PiperStudio
                     UI(() =>
                     {
                         exporting = false; Cursor = Cursors.Default;
-                        SetStatus(Lang.T("Exported ") + path + (srt != null ? "  " + Lang.T("(+ subtitles)") : ""));
+                        SetStatus(Lang.T("Exported ") + path + (srt != null ? "  " + Lang.T("(+ subtitles)") : "") + (only == null && !double.IsNaN(TargetLufs) ? "  · " + TargetLufs + " LUFS" : ""));
                         Log("Exported " + path + (srt != null ? " + " + srt : ""));
                         try { Process.Start("explorer.exe", "/select,\"" + path + "\""); } catch { }
                     });
                 }
                 catch (Exception ex) { UI(() => { exporting = false; Cursor = Cursors.Default; ShowError(ex); }); }
             });
+        }
+
+        ToolStripMenuItem miSnap;
+        Button bSnap;
+
+        void SelectAllTime() { tl.SelA = 0; tl.SelB = tl.P.Length; tl.SelClip = null; tl.Invalidate(); UpdateTime(); }
+
+        void ExportSelection()
+        {
+            if (!tl.HasRange) { SetStatus(Lang.T("First select a time range: drag over an empty part of the tracks, or hold Shift and drag anywhere.")); return; }
+            var p = tl.P.Clone();
+            p.DeleteRange(tl.SelB, Math.Max(tl.SelB + 1, p.Length + 1));
+            p.DeleteRange(0, tl.SelA);
+            ExportProject(p, null, (projectPath != null ? Path.GetFileNameWithoutExtension(projectPath) : "mix") + " (" + Lang.T("selection") + ")", miSubs.Checked);
+        }
+
+        bool NeedRange()
+        {
+            if (tl.HasRange) return true;
+            SetStatus(Lang.T("First select a time range: drag over an empty part of the tracks, or hold Shift and drag anywhere."));
+            return false;
+        }
+
+        void DeleteRange()
+        {
+            if (!NeedRange()) return;
+            long a = tl.SelA, b = tl.SelB;
+            Change(() => tl.P.DeleteRange(a, b));
+            tl.SelClip = null; tl.SelA = tl.SelB = 0; tl.Playhead = a;
+            SetStatus(string.Format(Lang.T("Deleted {0} from all tracks."), TimelineView.Time(b - a, tl.Rate)));
+            tl.Invalidate(); UpdateTime();
+        }
+
+        void SilenceRange()
+        {
+            if (!NeedRange()) return;
+            long a = tl.SelA, b = tl.SelB;
+            Change(() => tl.P.SilenceRange(a, b));
+            tl.SelClip = null;
+            SetStatus(string.Format(Lang.T("Made {0} silent on all tracks."), TimelineView.Time(b - a, tl.Rate)));
+            tl.Invalidate();
+        }
+
+        void SplitAtRange()
+        {
+            if (!NeedRange()) return;
+            long a = tl.SelA, b = tl.SelB; int n = 0;
+            Change(() => { n = tl.P.SplitAll(a) + tl.P.SplitAll(b); });
+            SetStatus(string.Format(Lang.T("Split {0} clip(s)."), n));
+            tl.Invalidate();
+        }
+
+        void MeasureMix()
+        {
+            if (tl.P.Length == 0) return;
+            var p = tl.P.Clone();
+            SetStatus(Lang.T("Measuring…"));
+            Task.Run(() =>
+            {
+                double m = p.MeasureLoudness(0, p.Length, null, null, CancellationToken.None);
+                UI(() => SetStatus(double.IsNaN(m) ? Lang.T("The mix is silent.") : string.Format(Lang.T("The mix is {0:0.0} LUFS. YouTube and Instagram aim for about −14, podcasts −16."), m)));
+            });
+        }
+
+        // Replaces the audio of every clip that uses the same recording (split parts share it), with undo.
+        void ReplaceAudio(Clip c, short[] newL, short[] newR)
+        {
+            var oldL = c.Data; var oldR = c.DataR;
+            Change(() =>
+            {
+                foreach (var t in tl.P.Tracks) foreach (var k in t.Clips)
+                    if (k.Data == oldL) { k.Data = newL; if (oldR != null && k.DataR == oldR) k.DataR = newR; }
+            });
+            tl.ForgetPeaks(); tl.Invalidate();
+        }
+
+        void ReduceNoise(Clip c, double db)
+        {
+            short[] sampleL = null, sampleR = null;
+            if (tl.HasRange)
+            {
+                long a = Math.Max(tl.SelA, c.Start), b = Math.Min(tl.SelB, c.End);
+                if (b - a > tl.Rate / 10)
+                {
+                    long i0 = c.In + (a - c.Start); int n = (int)(b - a);
+                    sampleL = new short[n]; Array.Copy(c.Data, i0, sampleL, 0, n);
+                    if (c.DataR != null) { sampleR = new short[n]; Array.Copy(c.DataR, i0, sampleR, 0, n); }
+                }
+            }
+            var data = c.Data; var dataR = c.DataR; int rate = tl.Rate;
+            SetStatus(Lang.T("Reducing noise…")); Cursor = Cursors.WaitCursor;
+            Task.Run(() =>
+            {
+                try
+                {
+                    var l = NoiseReducer.Process(data, rate, db, sampleL);
+                    var r = dataR != null ? NoiseReducer.Process(dataR, rate, db, sampleR ?? sampleL) : null;
+                    UI(() =>
+                    {
+                        Cursor = Cursors.Default;
+                        ReplaceAudio(c, l, r);
+                        SetStatus(Lang.T("Noise reduced") + " (" + db + " dB" + (sampleL != null ? ", " + Lang.T("using the selected noise sample") : "") + "). " + Lang.T("Ctrl+Z undoes it."));
+                    });
+                }
+                catch (Exception ex) { UI(() => { Cursor = Cursors.Default; ShowError(ex); }); }
+            });
+        }
+
+        void NormalizeClip(Clip c)
+        {
+            int rate = tl.Rate;
+            var seg = new short[c.Length]; Array.Copy(c.Data, c.In, seg, 0, seg.Length);
+            double m = Loudness.Measure(seg, rate);
+            if (double.IsNaN(m)) { SetStatus(Lang.T("This clip is silent.")); return; }
+            double g = Loudness.GainFor(m, -16);
+            Change(() => c.Gain = (float)Math.Min(8, c.Gain * g));
+            SetStatus(string.Format(Lang.T("Clip was {0:0.0} LUFS — volume set to {1}%."), m, (int)Math.Round(c.Gain * 100)));
+            tl.Invalidate();
         }
 
         void ExportSubtitles()
@@ -1036,7 +1197,9 @@ namespace PiperStudio
                 case Keys.Space: TogglePlay(); break;
                 case Keys.R: ToggleRecord(); break;
                 case Keys.S: if (!e.Control) SplitAtPlayhead(); else return; break;
-                case Keys.Delete: case Keys.Back: DeleteClip(); break;
+                case Keys.Delete: case Keys.Back: if (tl.HasRange && tl.SelClip == null) DeleteRange(); else DeleteClip(); break;
+                case Keys.Escape: if (tl.HasRange) tl.ClearRange(); else return; break;
+                case Keys.A: if (e.Control) SelectAllTime(); else return; break;
                 case Keys.Enter: if (tl.SelClip != null) EditClip(tl.SelClip); break;
                 case Keys.Home: StopPlayback(); tl.Playhead = 0; tl.EnsureVisible(0); tl.Invalidate(); UpdateTime(); break;
                 case Keys.End: StopPlayback(); tl.Playhead = tl.P.Length; tl.EnsureVisible(tl.Playhead); tl.Invalidate(); UpdateTime(); break;

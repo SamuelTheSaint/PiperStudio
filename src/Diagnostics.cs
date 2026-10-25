@@ -53,6 +53,7 @@ namespace PiperStudio
                 Text = Lang.T("The report contains no text you typed and never shows your bot token, so it's safe to send to someone who is helping you.") };
             Controls.Add(box);
             Controls.Add(summary);
+            PersianUi.Apply(bar); PersianUi.Apply(summary);
             Controls.Add(note);
             Controls.Add(bar);
             Shown += (s, e) => Run();
@@ -131,16 +132,57 @@ namespace PiperStudio
                     var sw2 = Stopwatch.StartNew();
                     ctx.Runner.Synthesize(job.Main, job.MainSpeaker, job.Finglish, job.Params, sample + " " + sample, CancellationToken.None);
                     Info(string.Format("Second sentence (voice already loaded): {0:0.00} s", sw2.Elapsed.TotalSeconds));
-                    if (sw2.Elapsed.TotalSeconds > secs * 2) Warn("This PC is slow with this voice — a \"medium\" voice will respond faster");
+                    if (sw2.Elapsed.TotalSeconds > secs * 2) Warn(job.Main.IsKokoro ? "This PC is slow with Kokoro — the smaller Kokoro model or a Piper voice will respond faster"
+                                                                                    : "This PC is slow with this voice — a \"medium\" voice will respond faster");
                 }
                 catch (Exception ex) { Bad("Test speech failed: " + ex.Message.Replace("\n", " | ")); }
             }
 
-            Head("Voices");
             var voices = ctx.GetVoices() ?? new List<VoiceInfo>();
+            Head("Kokoro (optional English engine)");
+            var kv0 = voices.FirstOrDefault(v => v.IsKokoro && !v.IsKokoroPython);
+            var kp0 = voices.FirstOrDefault(v => v.IsKokoroPython);
+            if (kv0 == null)
+            {
+                var k = KokoroInstall.Find(null);
+                if (!k.EngineOk && !k.ModelOk) Info("Built-in Kokoro: not installed (optional). Voice tab → Get Kokoro voices.");
+                else if (!k.EngineOk) Bad("Kokoro voices found in " + k.ModelDir + " but the engine (" + KokoroInstall.EngineLibName + ") is missing — Voice tab → Kokoro setup");
+                else Bad("Kokoro engine found in " + k.EngineDir + " but no voices — Voice tab → Get Kokoro voices");
+            }
+            else
+            {
+                Ok("Engine: " + kv0.KokoroEngineDir);
+                long msize = 0; try { msize = new FileInfo(kv0.OnnxPath).Length; } catch { }
+                Ok("Model: " + kv0.KokoroModelDir + "  (" + kv0.KokoroModelFile + ", " + Mb(msize) + ")");
+            }
+            if (kp0 != null) Ok("Your Python Kokoro: " + kp0.KokoroPython);
+            else Info("Python Kokoro: not found (optional — only if you installed it with pip yourself).");
+            foreach (var first in new[] { kv0, kp0 })
+            {
+                if (first == null) continue;
+                var kv = (job != null && job.Main.Engine == first.Engine) ? job.Main : (job != null && job.Second != null && job.Second.Engine == first.Engine) ? job.Second : first;
+                string name = first.IsKokoroPython ? "Python Kokoro" : "Kokoro";
+                try
+                {
+                    var p = new SynthParams();
+                    var sw = Stopwatch.StartNew();
+                    var pcm = ctx.Runner.Synthesize(kv, 0, false, p, "Hello, this is a test.", CancellationToken.None);
+                    double secs = pcm.Length / (double)kv.SampleRate;
+                    if (pcm.Length == 0) Bad(name + " test speech produced no audio");
+                    else Ok(string.Format("{0} test speech with {1}: {2:0.0} s of audio in {3:0.0} s (includes loading)", name, kv.KokoroId, secs, sw.Elapsed.TotalSeconds));
+                    var sw2 = Stopwatch.StartNew();
+                    ctx.Runner.Synthesize(kv, 0, false, p, "Hello, this is a test. Hello, this is a test.", CancellationToken.None);
+                    Info(string.Format("Second sentence ({0} already loaded): {1:0.00} s", name, sw2.Elapsed.TotalSeconds));
+                    if (sw2.Elapsed.TotalSeconds > secs * 2.5) Warn(name + " is slow on this PC — try the smaller Kokoro model, or Piper voices for live talking");
+                }
+                catch (Exception ex) { Bad(name + " test speech failed: " + ex.Message.Replace("\n", " | ")); }
+            }
+
+            Head("Voices");
             if (voices.Count == 0) Bad("No voices found");
             foreach (var v in voices)
             {
+                if (v.IsKokoro) continue;
                 long size = 0; try { size = new FileInfo(v.OnnxPath).Length; } catch { }
                 string line = string.Format("{0}  ·  {1}  ·  {2} Hz  ·  {3}{4}", v.FileName, v.LangCode, v.SampleRate, Mb(size), v.NumSpeakers > 1 ? "  ·  " + v.NumSpeakers + " speakers" : "");
                 if (v.LoadError != null) Bad(line + "  — settings file problem: " + v.LoadError); else Ok(line);

@@ -39,7 +39,15 @@ namespace PiperStudio
         readonly Dictionary<short[], short[]> peaks = new Dictionary<short[], short[]>();
         const int PeakBlock = 256;
 
-        enum Drag { None, Move, TrimL, TrimR, Volume, Pan, Scrub }
+        enum Drag { None, Move, TrimL, TrimR, Volume, Pan, Scrub, Range }
+        // time-range selection across all tracks (Audacity-style); SelB <= SelA = nothing selected
+        public long SelA, SelB;
+        public bool HasRange { get { return SelB > SelA; } }
+        public void ClearRange() { SelA = SelB = 0; Invalidate(); Fire(SelectionChanged); }
+        public bool Snap = true;
+        long snapLine = -1;          // where the gold snap guide is drawn while dragging
+        List<long> snapTargets;
+        long rangeAnchor;
         Drag drag;
         string lastHint;
         Point dragFrom;
@@ -240,6 +248,19 @@ namespace PiperStudio
                 g.DrawString(ti >= 0 ? Lang.T("Drop to add to this track") : Lang.T("Drop to add as new track(s)"), fName, Brushes.Gold, r.X + 10, r.Y + 10);
             }
 
+            // selected time range
+            if (HasRange)
+            {
+                int ra = Math.Max(HeaderW, X(SelA)), rb = Math.Min(w, X(SelB));
+                if (rb > ra)
+                    using (var b = new SolidBrush(Color.FromArgb(70, 120, 170, 255))) g.FillRectangle(b, ra, RulerH, rb - ra, h - RulerH);
+            }
+            if (snapLine >= 0)
+            {
+                int sx = X(snapLine);
+                if (sx >= HeaderW && sx <= w) using (var pen = new Pen(Color.Gold, 1) { DashStyle = DashStyle.Dash }) g.DrawLine(pen, sx, RulerH, sx, h);
+            }
+
             // ruler
             g.FillRectangle(new SolidBrush(Color.FromArgb(28, 30, 34)), 0, 0, w, RulerH);
             double[] steps = { 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600 };
@@ -255,8 +276,13 @@ namespace PiperStudio
                 int xm = X((long)((ts + step / 2) * Rate));
                 if (xm < w) g.DrawLine(Pens.DimGray, xm, RulerH - 5, xm, RulerH);
             }
+            if (HasRange)
+            {
+                int ra = Math.Max(HeaderW, X(SelA)), rb = Math.Min(w, X(SelB));
+                if (rb > ra) using (var b = new SolidBrush(Color.FromArgb(150, 120, 170, 255))) g.FillRectangle(b, ra, RulerH - 6, rb - ra, 6);
+            }
             g.FillRectangle(new SolidBrush(Color.FromArgb(28, 30, 34)), 0, 0, HeaderW, RulerH);
-            g.DrawString(Time(Playhead, Rate), fName, Brushes.White, 8, 7);
+            g.DrawString(HasRange ? Time(SelB - SelA, Rate) + " " + Lang.T("selected") : Time(Playhead, Rate), fName, HasRange ? Brushes.LightSkyBlue : Brushes.White, 8, 7);
 
             // playhead
             int px = X(Playhead);
@@ -294,7 +320,8 @@ namespace PiperStudio
             {
                 int xa = Math.Max(x1, HeaderW), xb = Math.Min(x2, w);
                 double spp = SamplesPerPx;
-                long len = c.Length, fi = (long)(c.FadeIn * Rate), fo = (long)(c.FadeOut * Rate);
+                long len = c.Length, fi, fo;
+                P.EffectiveFades(t, c, out fi, out fo);
                 for (int x = xa; x < xb; x++)
                 {
                     long s0 = (long)((x - x1) * spp), s1 = (long)((x - x1 + 1) * spp);
@@ -320,6 +347,13 @@ namespace PiperStudio
                     int hh = (int)Math.Min(half, m / 32768.0 * half * gain);
                     if (hh > 0) g.DrawLine(pen, x, mid - hh, x, mid + hh); else g.DrawLine(pen, x, mid, x + 1, mid);
                 }
+            }
+            // crossfades with overlapping clips on the same track: draw an X over the overlap
+            foreach (var d in t.Clips)
+            {
+                if (d == c || !(d.Start > c.Start && d.Start < c.End && d.End > c.End)) continue;
+                int ox1 = X(d.Start), ox2 = X(c.End);
+                using (var pen = new Pen(Color.Orange, 2)) { g.DrawLine(pen, ox1, r.Y + 16, ox2, r.Bottom); g.DrawLine(pen, ox1, r.Bottom, ox2, r.Y + 16); }
             }
             // fades
             if (c.FadeIn > 0) using (var pen = new Pen(Color.Yellow)) g.DrawLine(pen, x1, r.Bottom, X(c.Start + (long)(c.FadeIn * Rate)), r.Y + 14);
@@ -388,6 +422,7 @@ namespace PiperStudio
             }
             Track track; int edge;
             var c = HitClip(e.Location, out track, out edge);
+            if ((ModifierKeys & Keys.Shift) != 0 && e.Button == MouseButtons.Left) c = null;   // Shift+drag selects time, even over clips
             if (track != null) SelTrack = track;
             SelClip = c;
             Fire(SelectionChanged);
@@ -396,11 +431,24 @@ namespace PiperStudio
                 if (e.Button == MouseButtons.Right) { Invalidate(); if (ClipMenu != null) ClipMenu(c, track, e.Location); return; }
                 drag = edge < 0 ? Drag.TrimL : edge > 0 ? Drag.TrimR : Drag.Move;
                 dragTrack = track; origStart = c.Start; origIn = c.In; origOut = c.Out;
+                BuildSnapTargets(c);
             }
             else
             {
                 if (e.Button == MouseButtons.Right && track != null && TrackMenu != null) { TrackMenu(track, e.Location); return; }
-                SetPlayhead(S(e.X)); drag = Drag.Scrub;
+                long at = SnapTime(S(e.X), null);
+                if ((ModifierKeys & Keys.Shift) != 0)
+                {
+                    // Shift+click: select from the playhead (or the current range) to here
+                    long anchor = HasRange ? (Math.Abs(at - SelA) < Math.Abs(at - SelB) ? SelB : SelA) : Playhead;
+                    SelA = Math.Min(anchor, at); SelB = Math.Max(anchor, at); rangeAnchor = anchor;
+                    drag = Drag.Range; Fire(SelectionChanged);
+                }
+                else
+                {
+                    if (HasRange) { SelA = SelB = 0; Fire(SelectionChanged); }
+                    SetPlayhead(at); rangeAnchor = at; drag = Drag.Range;
+                }
             }
             Invalidate();
         }
@@ -461,15 +509,30 @@ namespace PiperStudio
             }
             long d = (long)((e.X - dragFrom.X) * SamplesPerPx);
             long minLen = Rate / 50;
+            snapLine = -1;
             switch (drag)
             {
+                case Drag.Range:
+                    {
+                        long at = SnapTime(S(e.X), null);
+                        if (Math.Abs(e.X - dragFrom.X) < 4 && !HasRange) return;   // a click, not a drag
+                        SelA = Math.Min(rangeAnchor, at); SelB = Math.Max(rangeAnchor, at);
+                        Fire(SelectionChanged);
+                        if (HoverHint != null) HoverHint(Lang.T("Selected: ") + Time(SelA, Rate) + " – " + Time(SelB, Rate) + "  (" + Time(SelB - SelA, Rate) + ")");
+                        break;
+                    }
                 case Drag.Scrub: SetPlayhead(S(e.X)); break;
                 case Drag.Volume: SetVolume(e.X); break;
                 case Drag.Pan: SetPan(e.X); break;
                 case Drag.Move:
                     if (Math.Abs(e.X - dragFrom.X) < 3 && Math.Abs(e.Y - dragFrom.Y) < 3 && !dragChanged) return;
                     StartChange();
-                    SelClip.Start = Math.Max(0, origStart + d);
+                    {
+                        long ns = Math.Max(0, origStart + d), len = SelClip.Length;
+                        long ss = SnapTime(ns, SelClip), se = SnapTime(ns + len, SelClip);
+                        if (ss != ns) ns = ss; else if (se != ns + len) ns = Math.Max(0, se - len);
+                        SelClip.Start = ns;
+                    }
                     int ti = TrackAt(e.Y);
                     if (ti < 0 && e.Y >= TrackY(P.Tracks.Count) && dragTrack.Clips.Count > 1)
                     {
@@ -486,19 +549,48 @@ namespace PiperStudio
                     break;
                 case Drag.TrimL:
                     StartChange();
-                    SelClip.In = Math.Max(0, Math.Min(origOut - minLen, origIn + d));
-                    SelClip.Start = Math.Max(0, origStart + (SelClip.In - origIn));
+                    {
+                        long want = SnapTime(origStart + d, SelClip) - origStart;
+                        SelClip.In = Math.Max(0, Math.Min(origOut - minLen, origIn + want));
+                        SelClip.Start = Math.Max(0, origStart + (SelClip.In - origIn));
+                    }
                     break;
                 case Drag.TrimR:
                     StartChange();
-                    SelClip.Out = Math.Max(origIn + minLen, Math.Min(SelClip.Data.Length, origOut + d));
+                    {
+                        long endNow = origStart + (origOut - origIn) + d;
+                        long want = SnapTime(endNow, SelClip) - (origStart + (origOut - origIn));
+                        SelClip.Out = Math.Max(origIn + minLen, Math.Min(SelClip.Data.Length, origOut + want));
+                    }
                     break;
             }
             Invalidate();
         }
 
+        // Snapping: clip edges, the playhead, the selection and the start pull a dragged edge in when it's within
+        // 8 pixels. Hold Alt to drag freely.
+        long SnapTime(long t, Clip moving)
+        {
+            if (!Snap || (ModifierKeys & Keys.Alt) != 0) return t;
+            if (snapTargets == null || moving == null) BuildSnapTargets(moving);
+            long thr = (long)(8 * SamplesPerPx), best = t, bestD = thr + 1;
+            foreach (var c in snapTargets) { long dd = Math.Abs(c - t); if (dd < bestD) { bestD = dd; best = c; } }
+            if (bestD <= thr) { snapLine = best; return best; }
+            return t;
+        }
+
+        void BuildSnapTargets(Clip moving)
+        {
+            var l = new List<long> { 0, Playhead };
+            if (HasRange) { l.Add(SelA); l.Add(SelB); }
+            foreach (var t in P.Tracks) foreach (var c in t.Clips) if (c != moving) { l.Add(c.Start); l.Add(c.End); }
+            snapTargets = l;
+        }
+
         protected override void OnMouseUp(MouseEventArgs e)
         {
+            snapLine = -1; snapTargets = null;
+            if (drag == Drag.Range && !HasRange && Math.Abs(e.X - dragFrom.X) >= 4) { }
             if (dragChanged) Fire(Changed);
             drag = Drag.None; dragChanged = false;
             UpdateScroll(); Invalidate();

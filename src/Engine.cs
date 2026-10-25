@@ -20,10 +20,17 @@ namespace PiperStudio
         public double NoiseScale = 0.667, LengthScale = 1.0, NoiseW = 0.8;
         public List<KeyValuePair<string, int>> Speakers = new List<KeyValuePair<string, int>>();
         public bool IsPersian { get { return LangFamily == "fa"; } }
+        // Kokoro voices (see Kokoro.cs) share this class so every voice picker, mixed text, Tracks and the bot just work.
+        public string Engine = "piper";
+        public string KokoroEngineDir, KokoroModelDir, KokoroModelFile, KokoroLang, KokoroId, KokoroPython;
+        public int KokoroSid;
+        public bool IsKokoro { get { return Engine == "kokoro" || Engine == "kokoro-py"; } }   // either Kokoro engine
+        public bool IsKokoroPython { get { return Engine == "kokoro-py"; } }
 
         public override string ToString()
         {
             string lang = LangName != "" ? LangName : LangCode;
+            if (IsKokoro) return lang + " · " + (IsKokoroPython ? Dataset.Replace("Kokoro", "Kokoro (Python)") : Dataset) + " (" + Lang.T(Quality) + ")";
             string s = lang + " · " + (Dataset != "" ? Dataset : FileName);
             if (Quality != "") s += " (" + Quality + ")";
             if (NumSpeakers > 1) s += " · " + NumSpeakers + " speakers";
@@ -110,6 +117,7 @@ namespace PiperStudio
         public Process Proc;
         public readonly object Lock = new object();
         public bool InUse;
+        public bool KeepOnStop;   // Python Kokoro takes long to start: let its current sentence finish instead of killing it
         public StringBuilder Err = new StringBuilder();
         public int Counter;
         public bool Alive { get { try { return Proc != null && !Proc.HasExited; } catch { return false; } } }
@@ -119,6 +127,7 @@ namespace PiperStudio
     {
         public string PiperExe;
         public Action<string> Log;
+        public int KokoroThreads = Math.Max(1, Math.Min(4, Environment.ProcessorCount));
         readonly object poolLock = new object();
         readonly Dictionary<string, LiveProc> pool = new Dictionary<string, LiveProc>(); // one per voice file
 
@@ -129,14 +138,15 @@ namespace PiperStudio
         {
             lock (poolLock)
                 foreach (var lp in pool.Values)
-                    if (lp.InUse) try { lp.Proc.Kill(); } catch { }
+                    if (lp.InUse && !lp.KeepOnStop) try { lp.Proc.Kill(); } catch { }
         }
 
         public void Shutdown()
         {
             lock (poolLock)
             {
-                foreach (var lp in pool.Values) try { lp.Proc.Kill(); } catch { }
+                // closing stdin lets helpers (and the real python.exe behind a venv launcher) exit by themselves
+                foreach (var lp in pool.Values) { try { lp.Proc.StandardInput.Close(); } catch { } try { if (!lp.Proc.WaitForExit(300)) lp.Proc.Kill(); } catch { } }
                 pool.Clear();
             }
         }
@@ -167,34 +177,61 @@ namespace PiperStudio
             return a.ToString();
         }
 
-        LiveProc Start(string args, string key)
+        static string Q(string s) { return "\"" + s + "\""; }
+
+        // Kokoro runs in a copy of this program started in helper mode (see KokoroHost).
+        string KokoroArgs(VoiceInfo v)
         {
-            if (string.IsNullOrEmpty(PiperExe) || !File.Exists(PiperExe))
-                throw new Exception("piper.exe was not found. Set its location on the Voice tab.");
-            var psi = new ProcessStartInfo(PiperExe, args)
+            return "--kokoro-host " + Q(v.KokoroEngineDir) + " " + Q(v.KokoroModelDir) + " " + Q(v.KokoroModelFile) + " "
+                + (string.IsNullOrEmpty(v.KokoroLang) ? "-" : v.KokoroLang) + " " + KokoroThreads;
+        }
+
+        LiveProc Start(string args, string key, bool kokoro, string python = null)
+        {
+            ProcessStartInfo psi;
+            if (python != null)
             {
-                UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
-                WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(PiperExe))
-            };
+                psi = new ProcessStartInfo(python, args) { WorkingDirectory = Path.GetDirectoryName(python) };
+                psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+                psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
+            }
+            else if (kokoro)
+            {
+                string self = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                bool win = Environment.OSVersion.Platform == PlatformID.Win32NT;
+                psi = win ? new ProcessStartInfo(self, args) : new ProcessStartInfo("mono", Q(self) + " " + args);
+                psi.WorkingDirectory = Path.GetDirectoryName(self);
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(PiperExe) || !File.Exists(PiperExe))
+                    throw new Exception("piper.exe was not found. Set its location on the Voice tab.");
+                psi = new ProcessStartInfo(PiperExe, args) { WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(PiperExe)) };
+            }
+            psi.UseShellExecute = false; psi.CreateNoWindow = true;
+            psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
             var lp = new LiveProc { Key = key, Proc = new Process { StartInfo = psi } };
             lp.Proc.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (lp.Err) { if (lp.Err.Length > 8000) lp.Err.Clear(); lp.Err.AppendLine(e.Data); } };
             lp.Proc.Start();
             lp.Proc.BeginErrorReadLine();
-            if (Log != null) Log("Started piper (voice loading in background)");
+            if (Log != null) Log(python != null ? "Started Kokoro in your Python install (loading — the first sentence takes a few seconds)"
+                               : kokoro ? "Started Kokoro (voices loading in background)" : "Started piper (voice loading in background)");
             return lp;
         }
 
         LiveProc Get(VoiceInfo v, int speaker, bool latin, SynthParams p)
         {
-            string args = Args(v, speaker, latin, p);
-            string slot = v.OnnxPath + (latin ? "|latin" : "");
+            bool kokoro = v.IsKokoro, py = v.IsKokoroPython;
+            string args = py ? "-u " + Q(KokoroPython.ScriptPath()) + " " + (v.KokoroId.StartsWith("b") ? "b" : "a")
+                        : kokoro ? KokoroArgs(v) : Args(v, speaker, latin, p);
+            string slot = py ? "kokoropy|" + v.KokoroPython
+                        : kokoro ? "kokoro|" + v.KokoroModelDir + "|" + v.KokoroLang : v.OnnxPath + (latin ? "|latin" : "");
             lock (poolLock)
             {
                 LiveProc lp;
                 if (pool.TryGetValue(slot, out lp))
                 {
-                    if (lp.Key == args && lp.Alive) return lp;
+                    if ((lp.Key == args || (py && lp.Key == slot)) && lp.Alive) return lp;
                     if (!lp.InUse) try { lp.Proc.Kill(); } catch { }
                     pool.Remove(slot);
                 }
@@ -204,7 +241,8 @@ namespace PiperStudio
                     var old = pool.FirstOrDefault(kv => !kv.Value.InUse);
                     if (old.Value != null) { try { old.Value.Proc.Kill(); } catch { } pool.Remove(old.Key); }
                 }
-                lp = Start(args, args);
+                lp = Start(args, py ? slot : args, kokoro, py ? v.KokoroPython : null);
+                lp.KeepOnStop = py;
                 pool[slot] = lp;
                 return lp;
             }
@@ -247,7 +285,10 @@ namespace PiperStudio
                         string dir = Path.Combine(Path.GetTempPath(), "PiperStudio");
                         Directory.CreateDirectory(dir);
                         string wav = Path.Combine(dir, "live_" + lp.Proc.Id + "_" + (lp.Counter++) + ".wav");
-                        string line = "{\"text\": " + JsonEscape(text) + ", \"output_file\": " + JsonEscape(wav) + "}\n";
+                        string line = "{\"text\": " + JsonEscape(text) + ", \"output_file\": " + JsonEscape(wav);
+                        if (v.IsKokoro)
+                            line += ", \"sid\": " + v.KokoroSid + ", \"voice\": " + JsonEscape(v.KokoroId) + ", \"speed\": " + Inv(p.LengthScale > 0 ? 1.0 / p.LengthScale : 1.0);
+                        line += "}\n";
                         // UTF-8 bytes straight to stdin, so Persian survives.
                         byte[] bytes = new UTF8Encoding(false).GetBytes(line);
                         var stdin = lp.Proc.StandardInput.BaseStream;
@@ -262,15 +303,17 @@ namespace PiperStudio
                         {
                             string e; lock (lp.Err) e = lp.Err.ToString();
                             lock (poolLock) { foreach (var k in pool.Where(kv => kv.Value == lp).Select(kv => kv.Key).ToList()) pool.Remove(k); }
+                            try { lp.Proc.Kill(); } catch { }   // don't leave a half-working process behind
                             if (attempt == 0 && e.Trim().Length == 0) continue; // process died quietly: try once more
                             var lines = e.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                            throw new Exception("Piper failed.\n" + string.Join("\n", lines.Skip(Math.Max(0, lines.Length - 6))));
+                            throw new Exception((v.IsKokoro ? "Kokoro failed.\n" : "Piper failed.\n") + string.Join("\n", lines.Skip(Math.Max(0, lines.Length - 6))));
                         }
                         var samples = Audio.ReadWavPcm(wav);
                         try { File.Delete(wav); } catch { }
                         string tag = (v.NumSpeakers > 1 ? " · speaker " + speaker : "") + (latinScript ? " · Finglish" : "");
+                        int rate = v.SampleRate;
                         if (Log != null) Log(string.Format("{0}{1}  {2:0.0}s  «{3}»", v.FileName, tag,
-                            samples.Length / (double)v.SampleRate, text.Length > 60 ? text.Substring(0, 60) + "…" : text));
+                            samples.Length / (double)rate, text.Length > 60 ? text.Substring(0, 60) + "…" : text));
                         return samples;
                     }
                     catch (IOException)

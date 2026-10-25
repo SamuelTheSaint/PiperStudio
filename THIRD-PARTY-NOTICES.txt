@@ -40,5 +40,19 @@ included unmodified.
    Source code and license: https://ffmpeg.org/legal.html
    Windows builds: https://www.gyan.dev/ffmpeg/builds/ or https://github.com/BtbN/FFmpeg-Builds
 
+8. Kokoro engine: sherpa-onnx (kokoro\sherpa-onnx-c-api.dll) — only if the
+   kokoro folder is included. Copyright (c) the k2-fsa/sherpa-onnx authors
+   — Apache License 2.0. Source: https://github.com/k2-fsa/sherpa-onnx
+   It brings its own ONNX Runtime (kokoro\onnxruntime.dll) — MIT License.
+
+9. Kokoro-82M voices (kokoro\kokoro-…-v1_0 folder) — Apache License 2.0
+   Model: https://huggingface.co/hexgrad/Kokoro-82M (converted for sherpa-onnx:
+   https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models). The folder
+   contains the license text, plus eSpeak NG data (GPL-3.0, see item 2).
+
+10. Vazirmatn font (built into PiperStudio.exe for the Persian interface)
+   Copyright (c) Saber Rastikerdar — SIL Open Font License 1.1
+   https://github.com/rastikerdar/vazirmatn  (license: fonts/OFL.txt in the source)
+
 Not included, but used if you install it:
    VB-CABLE virtual audio device (donationware) — https://vb-audio.com/Cable/

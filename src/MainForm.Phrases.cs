@@ -31,6 +31,7 @@ namespace PiperStudio
                 if (!multiline) f.AcceptButton = ok;
                 f.CancelButton = cancel;
                 f.Shown += (s, e) => { tb.Focus(); if (!multiline) tb.SelectAll(); };
+                PersianUi.Apply(f);
                 return f.ShowDialog(owner) == DialogResult.OK ? tb.Text : null;
             }
         }
@@ -169,7 +170,8 @@ namespace PiperStudio
                 {
                     int pi = i;
                     string text = cat.Items[i];
-                    string label = (i < 9 ? (i + 1) + "  " : "") + (text.Length > 34 ? text.Substring(0, 33) + "…" : text);
+                    bool fk = chkFKeys != null && chkFKeys.Checked;
+                    string label = (fk && i < 12 ? "F" + (i + 1) + "  " : i < 9 ? (i + 1) + "  " : "") + (text.Length > 34 ? text.Substring(0, 33) + "…" : text);
                     var b = new Button { Text = label, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(6, 3, 6, 3), Margin = new Padding(3), Font = new Font("Tahoma", 10.5f), BackColor = Color.FromArgb(235, 242, 252), FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
                     b.FlatAppearance.BorderColor = Color.FromArgb(150, 180, 220);
                     if (TextTools.StartsRtl(text)) b.RightToLeft = RightToLeft.Yes;
@@ -185,6 +187,8 @@ namespace PiperStudio
             phraseButtons.Controls.Add(add);
             phraseCats.ResumeLayout(); phraseButtons.ResumeLayout();
             if (tray != null) RebuildTrayPhrases();
+            foreach (Control c in phraseButtons.Controls) c.AccessibleName = c.Text;
+            ApplyAccessTo(phraseCats); ApplyAccessTo(phraseButtons);
         }
 
         void SpeakPhrase(int index)

@@ -19,11 +19,13 @@ namespace PiperStudio
     {
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
         public static bool Headless;
-        public const string Version = "1.1";
+        public const string Version = "1.2";
 
         [STAThread]
         static int Main(string[] args)
         {
+            if (args.Length > 5 && args[0] == "--kokoro-host") return KokoroHost.Run(args);
+            if (args.Length > 0 && args[0].EndsWith(".pstudio", StringComparison.OrdinalIgnoreCase) && File.Exists(args[0])) MainForm.StartProject = Path.GetFullPath(args[0]);
             if (args.Length > 0 && args[0] == "--selftest") return SelfTest.Run(args);
             if (args.Length > 1 && args[0] == "--dumpstrings") { Headless = true; var f = new MainForm(); Lang.Dump(f, args[1]); var tf = new TracksForm(new TracksHost { GetJob = () => null, GetOutDir = () => "." }); Lang.Dump(tf, args[1] + ".tracks"); return 0; }
             try { if (Environment.OSVersion.Platform == PlatformID.Win32NT) SetProcessDPIAware(); } catch { }
@@ -56,7 +58,7 @@ namespace PiperStudio
 
         // controls
         TextBox txt, txtPiper, txtOutDir, txtFileName, txtFfmpeg, txtRepl, txtLog;
-        ComboBox cboVoice, cboSpeaker, cboVoice2, cboSpeaker2, cboDir, cboFormat, cboBitrate, cboRate;
+        ComboBox cboVoice, cboSpeaker, cboVoice2, cboSpeaker2, cboDir, cboFormat, cboBitrate, cboRate, cboLoudness;
         CheckBox chkFinglish, chkMixed, chkSplit, chkOpenAfter, chkNoOverwrite, chkNormalize, chkSrt;
         TrackBar trkSpeed, trkNoise, trkNoiseW, trkVolume;
         Label lblCount, lblFfmpeg, lblVoiceInfo, lblFinglishTip;
@@ -88,6 +90,9 @@ namespace PiperStudio
             SuspendLayout();
             BuildUi();
             Lang.Apply(this);
+            PersianUi.Enabled = IniBool("vazir", true);
+            PersianUi.Apply(this);
+            PersianUi.Mirror(this, IniBool("rtl", true));
             ResumeLayout(true);
 
             runner.Log = s => AddLog(s);
@@ -96,6 +101,8 @@ namespace PiperStudio
             ApplySettingsToUi();
             LoadPhrases();
             LoadHistory();
+            LoadAccess();
+            LoadPresets();
             SetupTray();
             if (migratedFiles.Count > 0)
             {
@@ -121,6 +128,10 @@ namespace PiperStudio
             Shown += (s, e) =>
             {
                 RegisterHotkeys();
+                if (StartProject != null) { string sp = StartProject; StartProject = null; BeginInvoke(new Action(() => { OpenTracks(); try { tracks.LoadFile(sp); } catch (Exception ex) { ShowError(ex); } })); }
+                var t0 = new System.Windows.Forms.Timer { Interval = 8000 };
+                t0.Tick += (s2, e2) => { t0.Stop(); t0.Dispose(); if (miAutoUpdate.Checked) CheckForUpdates(false); };
+                t0.Start();
                 if (firstRun) BeginInvoke(new Action(ShowWelcome));
                 try { split.SplitterDistance = Math.Max(300, split.Width - (int)(400 * DeviceDpi() / 96f)); } catch { }
                 if (string.IsNullOrEmpty(runner.PiperExe))
@@ -128,6 +139,57 @@ namespace PiperStudio
                 else if (voices.Count == 0)
                     SetStatus("No voices found. Put .onnx + .onnx.json voice files next to piper.exe or in a 'voices' folder.");
             };
+        }
+
+        public static string StartProject;     // a .pstudio file double-clicked in Windows
+        ToolStripMenuItem miAutoUpdate;
+        LinkLabel lnkUpdate;
+        string updateUrl;
+
+        void OpenVoiceBrowser()
+        {
+            using (var f = new VoiceBrowserForm(FindFfmpeg, VoiceFolders, AppPaths.VoicesDir))
+            {
+                if (Ini("voicelist_url", "") != "") { f.UrlOverride = Ini("voicelist_url", ""); f.BaseOverride = Ini("voicebase_url", ""); }   // testing only
+                f.ShowDialog(this);
+                if (f.Changed) RefreshVoices();
+            }
+        }
+
+        // Quietly asks GitHub for the latest release; shows a yellow link when there's a newer one.
+        void CheckForUpdates(bool manual)
+        {
+            if (!manual)
+            {
+                DateTime last;
+                if (DateTime.TryParse(Ini("updatecheck_last", ""), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out last) && (DateTime.UtcNow - last).TotalHours < 20) return;
+            }
+            if (manual) SetStatus(Lang.T("Checking for updates…"));
+            UpdateCheck.Latest(Ini("updateapi", null)).ContinueWith(t =>
+            {
+                var r = t.Result;
+                UI(() =>
+                {
+                    if (r == null) { if (manual) SetStatus(Lang.T("Couldn't reach GitHub to check for updates (in Iran a VPN may be needed).")); return; }
+                    ini["updatecheck_last"] = DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+                    if (UpdateCheck.IsNewer(r[0], Program.Version))
+                    {
+                        updateUrl = r[1];
+                        lnkUpdate.Text = string.Format(Lang.T("⬆ Piper Studio {0} is available — download"), r[0].TrimStart('v', 'V'));
+                        lnkUpdate.Visible = true;
+                        AddLog("Update available: " + r[0] + " — " + r[1]);
+                        if (manual && MessageBox.Show(this, string.Format(Lang.T("Piper Studio {0} is available (you have {1}).\n\nOpen the download page?"), r[0].TrimStart('v', 'V'), Program.Version), "Piper Studio", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes) OpenUrl(r[1]);
+                    }
+                    else if (manual) SetStatus(string.Format(Lang.T("You have the latest version ({0})."), Program.Version));
+                });
+            });
+        }
+
+        void OpenVoiceBank()
+        {
+            using (var f = new VoiceBankForm(k => ini.ContainsKey(k) ? ini[k] : null, (k, v) => ini[k] = v))
+                f.ShowDialog(this);
+            SaveSettings();
         }
 
         int DeviceDpi() { using (var g = CreateGraphics()) return (int)g.DpiX; }
@@ -149,16 +211,23 @@ namespace PiperStudio
             var mVoices = new ToolStripMenuItem("&Voices");
             mVoices.DropDownItems.Add(new ToolStripMenuItem("&Refresh voice list", null, (s, e) => RefreshVoices()));
             mVoices.DropDownItems.Add(new ToolStripMenuItem("Open &voices folder", null, (s, e) => { var d = AppPaths.VoicesDir; Directory.CreateDirectory(d); OpenFolder(d); }));
+            mVoices.DropDownItems.Add(new ToolStripMenuItem("&Get more voices (listen and download)…", null, (s, e) => OpenVoiceBrowser()) { ShortcutKeys = Keys.Control | Keys.G });
             mVoices.DropDownItems.Add(new ToolStripMenuItem("&Download more voices (website)…", null, (s, e) => OpenUrl("https://huggingface.co/rhasspy/piper-voices/tree/main")));
             mVoices.DropDownItems.Add(new ToolStripMenuItem("&Listen to voice samples (website)…", null, (s, e) => OpenUrl("https://rhasspy.github.io/piper-samples/")));
             var mTools = new ToolStripMenuItem("&Tools");
             mTools.DropDownItems.Add(new ToolStripMenuItem("&Tracks editor (music, recording, editing)…", null, (s, e) => OpenTracks()) { ShortcutKeys = Keys.Control | Keys.T });
+            mTools.DropDownItems.Add(new ToolStripMenuItem("&Voice banking (record your own voice)…", null, (s, e) => OpenVoiceBank()));
             var mHelp = new ToolStripMenuItem("&Help");
             mHelp.DropDownItems.Add(new ToolStripMenuItem("&Tips", null, (s, e) => ShowTips()));
             mHelp.DropDownItems.Add(new ToolStripMenuItem("&Diagnostics (check that everything works)…", null, (s, e) => ShowDiagnostics()) { ShortcutKeys = Keys.F12 });
             mHelp.DropDownItems.Add(new ToolStripMenuItem("Open &settings folder", null, (s, e) => OpenFolder(AppPaths.DataDir)));
+            mHelp.DropDownItems.Add(new ToolStripSeparator());
+            mHelp.DropDownItems.Add(new ToolStripMenuItem("Check for &updates", null, (s, e) => CheckForUpdates(true)));
+            miAutoUpdate = new ToolStripMenuItem("Check for updates automatically") { CheckOnClick = true, Checked = IniBool("updatecheck", true) };
+            miAutoUpdate.CheckedChanged += (s, e) => ini["updatecheck"] = miAutoUpdate.Checked ? "1" : "0";
+            mHelp.DropDownItems.Add(miAutoUpdate);
             mHelp.DropDownItems.Add(new ToolStripMenuItem("&About", null, (s, e) => MessageBox.Show(this, Lang.Fa ? Lang.T("ABOUT") :
-                "Piper Studio " + Program.Version + "\nA free text-to-speech app, made especially for people who find speaking difficult.\n\nEngine: Piper (github.com/rhasspy/piper)\nMade by Samuel", Lang.T("About"), MessageBoxButtons.OK, MessageBoxIcon.Information)));
+                "Piper Studio " + Program.Version + "\nA free text-to-speech app, made especially for people who find speaking difficult.\n\nEngines: Piper (github.com/rhasspy/piper) and, optionally, Kokoro via sherpa-onnx (github.com/k2-fsa/sherpa-onnx)\nMade by Samuel", Lang.T("About"), MessageBoxButtons.OK, MessageBoxIcon.Information)));
             var mLang = new ToolStripMenuItem("&Language / زبان");
             mLang.DropDownItems.Add(new ToolStripMenuItem("English", null, (s, e) => SwitchLanguage(false)) { Checked = !Lang.Fa });
             mLang.DropDownItems.Add(new ToolStripMenuItem("فارسی", null, (s, e) => SwitchLanguage(true)) { Checked = Lang.Fa });
@@ -177,7 +246,9 @@ namespace PiperStudio
             btnTracks.Click += (s, e) => OpenTracks();
             var hint = new Label { AutoSize = true, Margin = new Padding(12, 12, 3, 3), ForeColor = Color.DimGray,
                 Text = "Select part of the text to play or export only that part." };
-            bar.Controls.AddRange(new Control[] { btnPlay, btnStop, btnExport, btnTracks, hint });
+            lnkUpdate = new LinkLabel { AutoSize = true, Visible = false, Margin = new Padding(12, 12, 3, 3), BackColor = Color.FromArgb(255, 243, 190), Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) };
+            lnkUpdate.LinkClicked += (s, e) => OpenUrl(updateUrl ?? UpdateCheck.ReleasesPage);
+            bar.Controls.AddRange(new Control[] { btnPlay, btnStop, btnExport, btnTracks, lnkUpdate, hint });
 
             // ----- status bar
             var st = new StatusStrip();
@@ -233,10 +304,14 @@ namespace PiperStudio
             split.Panel1.Controls.Add(edBar);
             split.Panel1.Controls.Add(phead);
             split.Panel1.Controls.Add(pbuttons);
+            split.Panel1.Controls.Add(BuildPredictionBar());
             split.Panel1.Controls.Add(quick);
+            HookPrediction(txtQuick);
+            HookPrediction(txt);
 
             // right: tabs
             var tabs = new TabControl { Dock = DockStyle.Fill, Multiline = true };
+            tabsControl = tabs;
             tabs.TabPages.Add(VoiceTab());
             tabs.TabPages.Add(SoundTab());
             tabs.TabPages.Add(ExportTab());
@@ -244,6 +319,7 @@ namespace PiperStudio
             tabs.TabPages.Add(BotTab());
             tabs.TabPages.Add(HistoryTab());
             tabs.TabPages.Add(ShortcutsTab());
+            tabs.TabPages.Add(AccessTab());
             tabs.TabPages.Add(TextTab());
             tabs.TabPages.Add(LogTab());
             split.Panel2.Padding = new Padding(0, 0, 6, 6);
@@ -259,6 +335,7 @@ namespace PiperStudio
         TabPage VoiceTab()
         {
             var g = Grid();
+            AddRow(g, "Preset", PresetRow());
             cboVoice = Combo(null, 0); cboVoice.SelectedIndexChanged += (s, e) => OnVoiceChanged();
             cboSpeaker = Combo(null, 0);
             AddRow(g, "Voice", cboVoice);
@@ -285,6 +362,8 @@ namespace PiperStudio
             grpMixed.Controls.Add(gm);
             AddFull(g, grpMixed);
 
+            AddFull(g, KokoroGroup());
+
             var grpEng = new GroupBox { Text = "Piper engine", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(6), Margin = new Padding(3, 12, 3, 3) };
             var ge = Grid(); ge.Padding = new Padding(0);
             txtPiper = new TextBox();
@@ -302,6 +381,7 @@ namespace PiperStudio
             trkNoise = Slider(g, "Expressiveness", 0, 100, 67, v => (v / 100.0).ToString("0.00"));
             AddFull(g, Note("Higher = more lively intonation, lower = flatter and more stable."));
             trkNoiseW = Slider(g, "Rhythm variation", 0, 100, 80, v => (v / 100.0).ToString("0.00"));
+            AddFull(g, Note("Expressiveness and rhythm change Piper voices only; speed and volume work for Kokoro voices too."));
             trkVolume = Slider(g, "Volume", 20, 300, 100, v => v + "%");
             numSentence = Num(0, 5, 0.2m, 0.05m);
             AddRow(g, "Pause after sentences (s)", numSentence);
@@ -330,6 +410,9 @@ namespace PiperStudio
             cboRate = Combo(new[] { "Voice default", "22050 Hz", "44100 Hz", "48000 Hz" }, 0);
             AddRow(g, "Sample rate", cboRate);
             AddFull(g, Note("48000 Hz matches most video projects."));
+            cboLoudness = Combo(Loudness.TargetNames, 0);
+            AddRow(g, "Loudness", cboLoudness);
+            AddFull(g, Note("Makes every file equally loud for social media or podcasts, with peaks kept under −1 dB."));
             chkSplit = new CheckBox { Text = "One file per paragraph (name_001, name_002 …)", AutoSize = true };
             chkNoOverwrite = new CheckBox { Text = "Never overwrite — add (2), (3) … to the name", AutoSize = true, Checked = true };
             chkOpenAfter = new CheckBox { Text = "Open the folder when export finishes", AutoSize = true, Checked = true };
@@ -647,6 +730,11 @@ namespace PiperStudio
             string keep1 = SelectedVoice(cboVoice) != null ? SelectedVoice(cboVoice).FileName : Ini("voice", "");
             string keep2 = SelectedVoice(cboVoice2) != null ? SelectedVoice(cboVoice2).FileName : Ini("voice2", "");
             voices = VoiceInfo.Scan(VoiceFolders());
+            kokoro = KokoroInstall.Find(Ini("kokorodir", ""));
+            voices.AddRange(kokoro.Voices());
+            kokoroPy = KokoroPython.Find(Ini("kokoropy", ""));
+            voices.AddRange(KokoroPython.Voices(kokoroPy));
+            UpdateKokoroStatus();
             foreach (var cb in new[] { cboVoice, cboVoice2 })
             {
                 cb.BeginUpdate(); cb.Items.Clear();
@@ -655,7 +743,8 @@ namespace PiperStudio
             }
             SelectVoice(cboVoice, keep1, null);
             SelectVoice(cboVoice2, keep2, "en");
-            AddLog("Found " + voices.Count + " voice(s).");
+            int nk = voices.Count(x => x.IsKokoro);
+            AddLog("Found " + voices.Count + " voice(s)" + (nk > 0 ? " (including " + nk + " Kokoro voices)." : ".") + (kokoroPy != null ? " Python Kokoro: " + kokoroPy : ""));
             UpdateVoiceOptions();
         }
 
@@ -706,7 +795,9 @@ namespace PiperStudio
             grpMixed.Enabled = !(fa && chkFinglish.Checked);
             cboVoice2.Enabled = cboSpeaker2.Enabled = chkMixed.Checked;
             if (chkMixed.Checked) FillSpeakers(cboVoice2, cboSpeaker2, null);
-            if (v != null)
+            if (v != null && v.IsKokoro)
+                lblVoiceInfo.Text = string.Format(Lang.T("Kokoro voice {0}   ·   {1} Hz   ·   English only"), v.KokoroId, v.SampleRate) + (v.IsKokoroPython ? "   ·   " + Lang.T("your Python install") : "");
+            else if (v != null)
                 lblVoiceInfo.Text = string.Format("File: {0}.onnx   ·   {1} Hz   ·   language: {2}", v.FileName, v.SampleRate, v.LangCode);
             else lblVoiceInfo.Text = "No voice selected.";
         }
@@ -889,14 +980,15 @@ namespace PiperStudio
             return p;
         }
 
-        class ExportOptions { public string Folder, Ext, Ffmpeg, Bitrate; public bool Split, NoOverwrite, Srt; public int RateChoice; }
+        class ExportOptions { public string Folder, Ext, Ffmpeg, Bitrate; public bool Split, NoOverwrite, Srt; public int RateChoice; public double Lufs = double.NaN; }
 
         ExportOptions GetExportOptions(bool quiet)
         {
             var o = new ExportOptions
             {
                 Folder = OutDir(), Ext = FormatExt(), Ffmpeg = FindFfmpeg(), Bitrate = cboBitrate.SelectedItem.ToString(),
-                Split = chkSplit.Checked, NoOverwrite = chkNoOverwrite.Checked, Srt = chkSrt.Checked, RateChoice = cboRate.SelectedIndex
+                Split = chkSplit.Checked, NoOverwrite = chkNoOverwrite.Checked, Srt = chkSrt.Checked, RateChoice = cboRate.SelectedIndex,
+                Lufs = Loudness.Targets[Math.Max(0, cboLoudness.SelectedIndex)]
             };
             if (o.Ext != ".wav" && o.Ffmpeg == null)
             {
@@ -1020,6 +1112,7 @@ namespace PiperStudio
         string WriteAudio(short[] pcm, int voiceRate, ExportOptions opt, string name)
         {
             string path = UniquePath(opt.Folder, name, opt.Ext, opt.NoOverwrite);
+            if (!double.IsNaN(opt.Lufs)) pcm = Loudness.NormalizeMono(pcm, voiceRate, opt.Lufs);
             int rate = opt.RateChoice == 0 ? voiceRate : new[] { voiceRate, 22050, 44100, 48000 }[opt.RateChoice];
             if (opt.Ext == ".wav")
             {
@@ -1224,7 +1317,7 @@ namespace PiperStudio
         // ================================================================== misc
         void OnKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.F5) { Play(); e.Handled = true; }
+            if (e.KeyCode == Keys.F5 && !chkFKeys.Checked) { Play(); e.Handled = true; }
             else if (e.Control && !e.Alt && !e.Shift && ((e.KeyCode >= Keys.D1 && e.KeyCode <= Keys.D9) || (e.KeyCode >= Keys.NumPad1 && e.KeyCode <= Keys.NumPad9)))
             {
                 SpeakPhrase(e.KeyCode >= Keys.NumPad1 ? e.KeyCode - Keys.NumPad1 : e.KeyCode - Keys.D1);
@@ -1344,6 +1437,7 @@ namespace PiperStudio
             cboFormat.SelectedIndex = Math.Min(cboFormat.Items.Count - 1, IniInt("format", 0));
             cboBitrate.SelectedIndex = Math.Min(cboBitrate.Items.Count - 1, IniInt("bitrate", 2));
             cboRate.SelectedIndex = Math.Min(cboRate.Items.Count - 1, IniInt("rate", 0));
+            cboLoudness.SelectedIndex = Math.Max(0, Math.Min(cboLoudness.Items.Count - 1, IniInt("lufs", 0)));
             chkSplit.Checked = IniBool("split", false);
             chkNoOverwrite.Checked = IniBool("nooverwrite", true);
             chkOpenAfter.Checked = IniBool("openafter", true);
@@ -1387,7 +1481,8 @@ namespace PiperStudio
             d["sentence"] = numSentence.Value.ToString(CultureInfo.InvariantCulture);
             d["paragraph"] = numParagraph.Value.ToString(CultureInfo.InvariantCulture);
             d["outdir"] = txtOutDir.Text; d["format"] = cboFormat.SelectedIndex.ToString();
-            d["bitrate"] = cboBitrate.SelectedIndex.ToString(); d["rate"] = cboRate.SelectedIndex.ToString();
+            d["bitrate"] = cboBitrate.SelectedIndex.ToString(); d["rate"] = cboRate.SelectedIndex.ToString(); d["lufs"] = cboLoudness.SelectedIndex.ToString();
+            if (ini.ContainsKey("preset")) d["preset"] = ini["preset"];
             d["split"] = chkSplit.Checked ? "1" : "0"; d["nooverwrite"] = chkNoOverwrite.Checked ? "1" : "0";
             d["openafter"] = chkOpenAfter.Checked ? "1" : "0"; d["ffmpeg"] = txtFfmpeg.Text;
             d["normalize"] = chkNormalize.Checked ? "1" : "0"; d["direction"] = cboDir.SelectedIndex.ToString();
@@ -1395,12 +1490,16 @@ namespace PiperStudio
             d["bottoken"] = Secret.Protect(txtToken.Text.Trim()); d["botproxy"] = txtProxy.Text.Trim(); d["botowner"] = botOwner.ToString(CultureInfo.InvariantCulture);
             d["botownername"] = botOwnerName; d["botauto"] = chkBotAuto.Checked ? "1" : "0";
             if (ini.ContainsKey("botapi")) d["botapi"] = ini["botapi"];
-            foreach (var kv in ini) if (kv.Key.StartsWith("tracks_")) d[kv.Key] = kv.Value;
+            if (ini.ContainsKey("kokorodir")) d["kokorodir"] = ini["kokorodir"];
+            if (ini.ContainsKey("kokoropy")) d["kokoropy"] = ini["kokoropy"];
+            foreach (var k in new[] { "updatecheck", "updatecheck_last", "vazir", "rtl" }) if (ini.ContainsKey(k)) d[k] = ini[k];
+            foreach (var kv in ini) if (kv.Key.StartsWith("tracks_") || kv.Key.StartsWith("vb_")) d[kv.Key] = kv.Value;
             d["lang"] = langOverride ?? (Lang.Fa ? "fa" : "en");
             d["srt"] = chkSrt.Checked ? "1" : "0";
             d["hk_speak"] = chkHkSpeak.Checked ? "1" : "0"; d["hk_show"] = chkHkShow.Checked ? "1" : "0"; d["hk_phrases"] = chkHkPhrases.Checked ? "1" : "0";
             d["tray"] = chkTray.Checked ? "1" : "0"; d["seltospeakers"] = chkSelToSpeakers.Checked ? "1" : "0";
             d["keephistory"] = chkKeepHistory.Checked ? "1" : "0";
+            SaveAccess(d);
             d["phrasecat"] = phraseCat.ToString(); d["phrasesopen"] = phrasesOpen ? "1" : "0";
             d["device"] = DeviceName(); d["monitor"] = chkMonitor.Checked ? "1" : "0"; d["topmost"] = chkTopMost.Checked ? "1" : "0";
             d["max"] = WindowState == FormWindowState.Maximized ? "1" : "0";
@@ -1418,10 +1517,13 @@ namespace PiperStudio
         public static int Run(string[] a)
         {
             var r = new PiperRunner { PiperExe = a[1], Log = Console.WriteLine };
-            var v = VoiceInfo.Load(a[2]);
+            Func<string, VoiceInfo> load = x =>
+                x.StartsWith("kokoropy-") ? KokoroPython.Voices(x.Split('@')[1]).First(k => k.FileName == x.Split('@')[0])   // kokoropy-af_heart@C:\path\python.exe
+              : x.StartsWith("kokoro-") ? KokoroInstall.Find("").Voices().First(k => k.FileName == x) : VoiceInfo.Load(x);
+            var v = load(a[2]);
             Console.WriteLine("Voice: " + v + " err=" + v.LoadError + "  rate=" + v.SampleRate + " persian=" + v.IsPersian);
             var job = new Job { Main = v, Normalize = true };
-            if (a.Length > 5 && a[5] != "-") { job.Second = VoiceInfo.Load(a[5]); job.Mixed = true; }
+            if (a.Length > 5 && a[5] != "-") { job.Second = load(a[5]); job.Mixed = true; }
             if (a.Length > 6) job.Finglish = true;
             job.Replacements = TextTools.ParseReplacements("LHC=Large Hadron Collider");
             var chunks = TextTools.MakeChunks(a[4].Replace("\\n", "\n"), 0);

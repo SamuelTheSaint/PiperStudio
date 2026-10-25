@@ -1,4 +1,4 @@
-PIPER STUDIO 1.0 — free text-to-speech for Windows
+PIPER STUDIO 1.2 — free text-to-speech for Windows
 ===================================================
 
 Piper Studio reads anything you type in a natural voice — in Persian and English.
@@ -16,6 +16,10 @@ Everything runs on your own computer. Your text is not sent anywhere
 
 GETTING STARTED
 ---------------
+Easiest: run PiperStudio-Setup.exe. It installs for your Windows account (no
+admin rights needed), adds Piper Studio to the Start menu, opens .pstudio
+projects with a double-click, and can be removed in Settings → Apps.
+Or use the zip:
 1. Extract the whole zip to a folder (for example D:\PiperStudio).
    Do not run it from inside the zip.
 2. Double-click PiperStudio.exe.
@@ -25,6 +29,8 @@ GETTING STARTED
 4. Type something in the big box and press F5.
 
 Requirements: Windows 10 or 11 (64-bit). Nothing else to install.
+Piper Studio tells you when a new version is out (a yellow link at the top;
+Help → "Check for updates").
 
 
 INCLUDED VOICES
@@ -32,9 +38,12 @@ INCLUDED VOICES
   fa_IR-amir-medium   Persian, male
   en_US-ryan-high     English (US), male
 
-Choose the voice on the Voice tab. More voices (40+ languages):
-Voices menu → "Download more voices". Put each .onnx file together with its
-.onnx.json file in the "voices" folder, then Voices → Refresh voice list.
+Choose the voice on the Voice tab. More voices (40+ languages, including more
+Persian voices: gyro, ganji, reza_ibrahim): Voices menu → "Get more voices"
+(Ctrl+G) — listen to a sample, then click Download. It needs Hugging Face
+(in Iran maybe a VPN). You can also put .onnx + .onnx.json files in the
+"voices" folder yourself, then Voices → Refresh voice list.
+Optional: 28 very natural English voices from Kokoro — see section 6.
 
 
 1) PLAY AND SAVE
@@ -46,6 +55,11 @@ Voices menu → "Download more voices". Put each .onnx file together with its
   has it, otherwise see the Export tab).
 - Each line is a paragraph. Type [pause 2] to add 2 seconds of silence.
 - Tick "Also save subtitles (.srt)" on the Export tab to get subtitles for videos.
+- Export tab → Loudness: −14 LUFS for YouTube / Instagram / TikTok, −16 for
+  podcasts. Every file comes out equally loud, with peaks under −1 dB.
+- Voice presets (top of the Voice tab): pick "Calm", "Fast chat", "Clear and
+  slow"… or set things up and click "Save as…" to keep your own (it remembers
+  the voice too). Ctrl+Shift+1 … 9 switch presets.
 
 Persian tips:
 - Typing Persian with English letters (Finglish)? Tick "Finglish" on the Voice tab.
@@ -127,6 +141,18 @@ Open it with the purple "Tracks editor" button (or Tools menu, Ctrl+T).
   everything as one MP3/WAV/OGG file — plus a subtitles file (.srt) made from
   the speech clips (CC button, or File → "Export subtitles"). File menu →
   "Export each track separately" saves each track as its own WAV.
+- Select time: drag over an empty part of the tracks (or hold Shift and drag
+  anywhere). Space plays the selection; Del removes that time from ALL tracks
+  (everything after moves left); Ctrl+L makes it silent; File → "Export the
+  selected time…" saves just that part; Esc clears it.
+- Snapping (🧲, on by default): clips jump to other clips' edges, the playhead
+  and the selection when you drag them close. Hold Alt to place freely.
+- Crossfades: drag a clip so it overlaps the one before it on the same track —
+  the first fades out while the second fades in (an orange X shows it).
+- Clean up a recording: right-click it → "Reduce background noise" (light /
+  medium / strong). Best: first select a moment where only the noise is heard.
+- File → "Loudness of exported mix": −14 LUFS for YouTube / Instagram, −16 for
+  podcasts. "Measure the loudness of the mix" tells you where you are now.
 
 
 5) QUICK PHRASES, HISTORY AND SHORTCUTS (for everyday talking)
@@ -151,12 +177,91 @@ Open it with the purple "Tracks editor" button (or Tools menu, Ctrl+T).
   clock → Exit to quit.
 
 
+6) KOKORO VOICES (optional — very natural English)
+-------------------------------------------------
+Kokoro is a second, free speech engine with 28 English voices (US and UK,
+men and women) that sound more natural than most Piper voices.
+- Voice tab → "Get Kokoro voices…". Choose:
+    Smaller and faster (130 MB download) — best for talking live, or
+    Best quality (350 MB download) — a bit slower on older PCs.
+  It downloads once; after that it works without internet.
+- Then choose a Kokoro voice in the voice lists. The best ones have a ★
+  (Heart, Bella, Nicole, Emma, Michael, Fenrir, Puck).
+- Kokoro speaks ENGLISH ONLY. For Persian + English text: keep amir as the main
+  voice, tick "Read English words with a second voice" and choose a Kokoro voice
+  as the English voice.
+- Speed and volume work for Kokoro; "Expressiveness" and "Rhythm variation" only
+  change Piper voices.
+- Download blocked or slow? Download the .tar.bz2 file in your browser or
+  download manager (the links are in the Kokoro window), then click
+  "Use files I already have…" and pick the file.
+- Kokoro works everywhere Piper does: Say now, quick phrases, export, the
+  Tracks editor, the Telegram bot and the read-aloud shortcut.
+- Already installed Kokoro yourself with Python (pip install kokoro)? Piper
+  Studio finds it in C:\kokoro\.venv (or click "Use my Python Kokoro…" and pick
+  its python.exe). Its voices appear as "Kokoro (Python) …". It only works on
+  that PC, takes a few seconds to start, and downloads each new voice from
+  Hugging Face the first time you use it.
+
+
+7) WORD PREDICTION AND ACCESSIBILITY (Access tab)
+------------------------------------------------
+- Word prediction: while you type, up to 5 words appear above the Say now
+  box. Tab or Alt+1 takes the first one, Alt+2 … Alt+5 the others, or click.
+  It learns YOUR words (Persian and English) and which word you usually say
+  next, from Say now, quick phrases and the bot. "Forget learned words" clears it.
+- Big text and buttons; high contrast (black and yellow) — it turns on by
+  itself when Windows high contrast is on.
+- "F1 … F12 speak quick phrases 1–12": one key per phrase, like a
+  communication board (Play is then Ctrl+Enter).
+- Everything works with the keyboard: F6 / Shift+F6 jump between Say now,
+  quick phrases, the text and the tabs; Tab and arrow keys move between
+  buttons; the Menu key (or Shift+F10) on a phrase edits it.
+
+
+8) VOICE BANKING (Tools → Voice banking)
+---------------------------------------
+For people who are losing their voice (for example with ALS) — or anyone who
+wants to keep it: record your voice now, so a Piper voice can be made that
+sounds like you.
+- New voice bank → choose Persian or English (about 190 sentences each). Add
+  your own sentences too — the things you say most.
+- Space starts and stops recording, P listens, ← → move between sentences.
+  Each take is checked: too quiet, too loud, background noise, cut off.
+- Same microphone, room and distance every time; a headset mic in a quiet room
+  is best. A few sentences a day is fine. 15–20 minutes of speech is the
+  minimum for training; an hour or more sounds much better.
+- "Export for training…" makes a zip with your recordings, metadata.csv,
+  TRAINING.txt and train.sh. Training needs a strong NVIDIA graphics card or
+  free Google Colab and takes hours — TRAINING.txt explains every step. The
+  result is a normal Piper voice: put the .onnx and .onnx.json in the voices
+  folder and it appears in the voice list.
+- Keep the zip safe even if you don't train it now: it is your voice.
+
+
+9) ON AN ANDROID PHONE
+---------------------
+Piper Studio is for Windows, but the same Persian and English Piper voices can
+be your phone's voice with the free app SherpaTTS:
+1. Install F-Droid (f-droid.org), then search for "SherpaTTS" and install it.
+2. Open SherpaTTS → Manage languages → choose Persian (fa) → pick a voice such
+   as fa_IR-amir-medium or fa_IR-gyro-medium → download (needs Hugging Face;
+   in Iran maybe a VPN). English voices like en_US-ryan-high are there too.
+3. Android Settings → search "Text-to-speech output" → Preferred engine:
+   SherpaTTS, language: Persian.
+Then apps that read aloud (TalkBack, e-book readers, some keyboards) speak
+with it. Note: SherpaTTS says Google's new developer-verification rules may
+stop it working on certified Android phones from 2026/2027.
+
+
 SHORTCUTS
 ---------
 F5 play · Esc stop · Ctrl+E export · Ctrl+O open text · Ctrl+S save text ·
 Ctrl+B batch export · Ctrl+T Tracks editor · F12 Diagnostics ·
 Enter in "Say now" speaks immediately · ↑ / ↓ earlier sentences ·
-Ctrl+1 … 9 quick phrases · Ctrl+Alt+Space read selected text (any program)
+Ctrl+1 … 9 quick phrases · Ctrl+Alt+Space read selected text (any program) ·
+Tab / Alt+1 … 5 word suggestions · F6 next area · Ctrl+Enter play ·
+Ctrl+Shift+1 … 9 voice presets · Ctrl+G get more voices
 
 
 PROBLEMS?
