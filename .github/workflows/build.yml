@@ -1,0 +1,108 @@
+# Builds PiperStudio.exe on Windows and runs the tests on every push.
+# When you push a tag like v1.3, it also makes the full package (zip + installer)
+# and publishes them as a GitHub release.
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build PiperStudio.exe (C# compiler that comes with Windows)
+        shell: cmd
+        env:
+          CI: "true"
+        run: build.bat
+
+      - name: Run the tests
+        shell: pwsh
+        run: |
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          foreach ($t in 'T', 'T2', 'T3') {
+            & $csc /nologo /out:"$t.exe" /r:PiperStudio.exe /r:System.IO.Compression.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Security.dll "tests\$t.cs"
+            if ($LASTEXITCODE -ne 0) { throw "Could not compile $t" }
+            & ".\$t.exe"
+            if ($LASTEXITCODE -ne 0) { throw "$t failed" }
+          }
+
+      - name: Check the version number matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "$env:GITHUB_REF_NAME".TrimStart('v')
+          $src = Get-Content src\MainForm.cs -Raw
+          if ($src -notmatch "Version = `"$([regex]::Escape($tag))`"") { throw "Program.Version in src\MainForm.cs is not $tag" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PiperStudio-exe
+          path: PiperStudio.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: PiperStudio-exe
+
+      - name: Download the Piper engine, voices and FFmpeg
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory dl | Out-Null
+          Invoke-WebRequest https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip -OutFile dl\piper.zip
+          Expand-Archive dl\piper.zip dl\piper
+          $hf = 'https://huggingface.co/rhasspy/piper-voices/resolve/main'
+          foreach ($v in @('fa/fa_IR/amir/medium/fa_IR-amir-medium', 'en/en_US/ryan/high/en_US-ryan-high')) {
+            $name = Split-Path $v -Leaf
+            Invoke-WebRequest "$hf/$v.onnx?download=true" -OutFile "dl\$name.onnx"
+            Invoke-WebRequest "$hf/$v.onnx.json?download=true" -OutFile "dl\$name.onnx.json"
+          }
+          Invoke-WebRequest https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -OutFile dl\ffmpeg.zip
+          Expand-Archive dl\ffmpeg.zip dl\ffmpeg
+
+      - name: Put the package together
+        shell: pwsh
+        run: |
+          $pkg = 'pkg\PiperStudio'
+          New-Item -ItemType Directory "$pkg\voices" -Force | Out-Null
+          $piper = (Get-ChildItem dl\piper -Recurse -Filter piper.exe | Select-Object -First 1).Directory.FullName
+          Copy-Item "$piper\*" $pkg -Recurse
+          Copy-Item PiperStudio.exe $pkg
+          Copy-Item dl\*.onnx, dl\*.onnx.json "$pkg\voices"
+          Copy-Item (Get-ChildItem dl\ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName $pkg
+          Copy-Item docs\README.txt, docs\README-FA.txt, THIRD-PARTY-NOTICES.txt $pkg
+          Copy-Item LICENSE "$pkg\LICENSE.txt"
+          Get-ChildItem $pkg | Format-Table Name, Length
+
+      - name: Make the zip and the installer
+        shell: pwsh
+        run: |
+          $ver = "$env:GITHUB_REF_NAME".TrimStart('v')
+          Compress-Archive -Path pkg\PiperStudio -DestinationPath "PiperStudio-v$ver-Windows.zip" -CompressionLevel Optimal
+          choco install nsis -y --no-progress
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DVERSION=$ver" "/DSRC=$env:GITHUB_WORKSPACE\pkg\PiperStudio" "/DOUTFILE=$env:GITHUB_WORKSPACE\PiperStudio-v$ver-Setup.exe" installer\PiperStudio.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+          Get-ChildItem *.zip, *Setup.exe | Format-Table Name, Length
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            PiperStudio-v*-Windows.zip
+            PiperStudio-v*-Setup.exe
+          generate_release_notes: true
