@@ -19,12 +19,13 @@ namespace PiperStudio
     {
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
         public static bool Headless;
+        public const string Version = "1.1";
 
         [STAThread]
         static int Main(string[] args)
         {
             if (args.Length > 0 && args[0] == "--selftest") return SelfTest.Run(args);
-            if (args.Length > 1 && args[0] == "--dumpstrings") { Headless = true; var f = new MainForm(); Lang.Dump(f, args[1]); return 0; }
+            if (args.Length > 1 && args[0] == "--dumpstrings") { Headless = true; var f = new MainForm(); Lang.Dump(f, args[1]); var tf = new TracksForm(new TracksHost { GetJob = () => null, GetOutDir = () => "." }); Lang.Dump(tf, args[1] + ".tracks"); return 0; }
             try { if (Environment.OSVersion.Platform == PlatformID.Win32NT) SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -33,12 +34,14 @@ namespace PiperStudio
         }
     }
 
-    public class MainForm : Form
+    public partial class MainForm : Form
     {
         readonly string appDir = AppDomain.CurrentDomain.BaseDirectory;
-        string IniPath { get { return Path.Combine(appDir, "PiperStudio.ini"); } }
-        string ReplPath { get { return Path.Combine(appDir, "replacements.txt"); } }
-        string LastTextPath { get { return Path.Combine(appDir, "PiperStudio_lasttext.txt"); } }
+        // settings live in %APPDATA%\PiperStudio (or next to the exe in portable mode) — see AppPaths
+        string IniPath { get { return AppPaths.In("PiperStudio.ini"); } }
+        string ReplPath { get { return AppPaths.In("replacements.txt"); } }
+        string LastTextPath { get { return AppPaths.In("PiperStudio_lasttext.txt"); } }
+        List<string> migratedFiles = new List<string>();
         Dictionary<string, string> ini = new Dictionary<string, string>();
 
         readonly PiperRunner runner = new PiperRunner();
@@ -54,7 +57,7 @@ namespace PiperStudio
         // controls
         TextBox txt, txtPiper, txtOutDir, txtFileName, txtFfmpeg, txtRepl, txtLog;
         ComboBox cboVoice, cboSpeaker, cboVoice2, cboSpeaker2, cboDir, cboFormat, cboBitrate, cboRate;
-        CheckBox chkFinglish, chkMixed, chkSplit, chkOpenAfter, chkNoOverwrite, chkNormalize;
+        CheckBox chkFinglish, chkMixed, chkSplit, chkOpenAfter, chkNoOverwrite, chkNormalize, chkSrt;
         TrackBar trkSpeed, trkNoise, trkNoiseW, trkVolume;
         Label lblCount, lblFfmpeg, lblVoiceInfo, lblFinglishTip;
         NumericUpDown numSentence, numParagraph;
@@ -77,6 +80,7 @@ namespace PiperStudio
             KeyPreview = true;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
+            migratedFiles = AppPaths.MigrateOldSettings(appDir, AppPaths.DataDir);
             firstRun = !File.Exists(IniPath);
             ReadIni();
             if (firstRun && !Program.Headless) ini["lang"] = AskLanguage();
@@ -90,6 +94,14 @@ namespace PiperStudio
             LoadSettings();
             RefreshVoices();
             ApplySettingsToUi();
+            LoadPhrases();
+            LoadHistory();
+            SetupTray();
+            if (migratedFiles.Count > 0)
+            {
+                SaveSettings();   // re-save right away, so the bot token is stored encrypted
+                AddLog("Moved settings to " + AppPaths.DataDir + " (" + string.Join(", ", migratedFiles) + ")");
+            }
             UpdateFfmpegLabel();
             UpdateCount();
             WarmUp();
@@ -99,10 +111,16 @@ namespace PiperStudio
             chkMixed.CheckedChanged += (s, e) => WarmUp();
             chkFinglish.CheckedChanged += (s, e) => WarmUp();
             KeyDown += OnKeyDown;
-            FormClosing += (s, e) => { StopAll(); if (bot != null) bot.Stop(); SaveSettings(); runner.Shutdown(); };
-            FormClosed += (s, e) => { if (restarting) try { Process.Start(Application.ExecutablePath); } catch { } };
+            FormClosing += (s, e) =>
+            {
+                if (HideToTrayInsteadOfClosing(e)) return;
+                if (tracks != null && !tracks.IsDisposed) { tracks.Close(); if (!tracks.IsDisposed) { e.Cancel = true; exiting = false; return; } }
+                StopAll(); if (bot != null) bot.Stop(); SaveSettings(); SaveHistory(); runner.Shutdown();
+            };
+            FormClosed += (s, e) => { DisposeTray(); if (restarting) try { Process.Start(Application.ExecutablePath); } catch { } };
             Shown += (s, e) =>
             {
+                RegisterHotkeys();
                 if (firstRun) BeginInvoke(new Action(ShowWelcome));
                 try { split.SplitterDistance = Math.Max(300, split.Width - (int)(400 * DeviceDpi() / 96f)); } catch { }
                 if (string.IsNullOrEmpty(runner.PiperExe))
@@ -130,17 +148,21 @@ namespace PiperStudio
             mFile.DropDownItems.Add(new ToolStripMenuItem("E&xit", null, (s, e) => Close()));
             var mVoices = new ToolStripMenuItem("&Voices");
             mVoices.DropDownItems.Add(new ToolStripMenuItem("&Refresh voice list", null, (s, e) => RefreshVoices()));
-            mVoices.DropDownItems.Add(new ToolStripMenuItem("Open &voices folder", null, (s, e) => { var d = Path.Combine(appDir, "voices"); Directory.CreateDirectory(d); OpenFolder(d); }));
+            mVoices.DropDownItems.Add(new ToolStripMenuItem("Open &voices folder", null, (s, e) => { var d = AppPaths.VoicesDir; Directory.CreateDirectory(d); OpenFolder(d); }));
             mVoices.DropDownItems.Add(new ToolStripMenuItem("&Download more voices (website)…", null, (s, e) => OpenUrl("https://huggingface.co/rhasspy/piper-voices/tree/main")));
             mVoices.DropDownItems.Add(new ToolStripMenuItem("&Listen to voice samples (website)…", null, (s, e) => OpenUrl("https://rhasspy.github.io/piper-samples/")));
+            var mTools = new ToolStripMenuItem("&Tools");
+            mTools.DropDownItems.Add(new ToolStripMenuItem("&Tracks editor (music, recording, editing)…", null, (s, e) => OpenTracks()) { ShortcutKeys = Keys.Control | Keys.T });
             var mHelp = new ToolStripMenuItem("&Help");
             mHelp.DropDownItems.Add(new ToolStripMenuItem("&Tips", null, (s, e) => ShowTips()));
+            mHelp.DropDownItems.Add(new ToolStripMenuItem("&Diagnostics (check that everything works)…", null, (s, e) => ShowDiagnostics()) { ShortcutKeys = Keys.F12 });
+            mHelp.DropDownItems.Add(new ToolStripMenuItem("Open &settings folder", null, (s, e) => OpenFolder(AppPaths.DataDir)));
             mHelp.DropDownItems.Add(new ToolStripMenuItem("&About", null, (s, e) => MessageBox.Show(this, Lang.Fa ? Lang.T("ABOUT") :
-                "Piper Studio 1.0\nA free text-to-speech app, made especially for people who find speaking difficult.\n\nEngine: Piper (github.com/rhasspy/piper)\nMade by Samuel", Lang.T("About"), MessageBoxButtons.OK, MessageBoxIcon.Information)));
+                "Piper Studio " + Program.Version + "\nA free text-to-speech app, made especially for people who find speaking difficult.\n\nEngine: Piper (github.com/rhasspy/piper)\nMade by Samuel", Lang.T("About"), MessageBoxButtons.OK, MessageBoxIcon.Information)));
             var mLang = new ToolStripMenuItem("&Language / زبان");
             mLang.DropDownItems.Add(new ToolStripMenuItem("English", null, (s, e) => SwitchLanguage(false)) { Checked = !Lang.Fa });
             mLang.DropDownItems.Add(new ToolStripMenuItem("فارسی", null, (s, e) => SwitchLanguage(true)) { Checked = Lang.Fa });
-            menu.Items.AddRange(new ToolStripItem[] { mFile, mVoices, mLang, mHelp });
+            menu.Items.AddRange(new ToolStripItem[] { mFile, mVoices, mTools, mLang, mHelp });
 
             // ----- action bar
             var bar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(6, 6, 6, 4), WrapContents = false };
@@ -151,9 +173,11 @@ namespace PiperStudio
             btnStop.Click += (s, e) => StopAll();
             btnExport.Click += (s, e) => Export();
             btnStop.Enabled = false;
+            var btnTracks = BigButton("🎚  Tracks editor", Color.FromArgb(120, 80, 160));
+            btnTracks.Click += (s, e) => OpenTracks();
             var hint = new Label { AutoSize = true, Margin = new Padding(12, 12, 3, 3), ForeColor = Color.DimGray,
                 Text = "Select part of the text to play or export only that part." };
-            bar.Controls.AddRange(new Control[] { btnPlay, btnStop, btnExport, hint });
+            bar.Controls.AddRange(new Control[] { btnPlay, btnStop, btnExport, btnTracks, hint });
 
             // ----- status bar
             var st = new StatusStrip();
@@ -192,26 +216,34 @@ namespace PiperStudio
             txtQuick.KeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; QuickSay(); }
-                else if (e.KeyCode == Keys.Up && txtQuick.Text == "") { e.SuppressKeyPress = true; txtQuick.Text = lastQuick; txtQuick.SelectAll(); }
+                else if (e.KeyCode == Keys.Up) { e.SuppressKeyPress = true; HistoryNavigate(+1); }
+                else if (e.KeyCode == Keys.Down) { e.SuppressKeyPress = true; HistoryNavigate(-1); }
             };
             txtQuick.GotFocus += (s, e) => WarmUp();
+            txtQuick.TextChanged += (s, e) => { if (!settingQuickFromHistory) histNav = -1; };
             txtQuick.TextChanged += (s, e) => { var want = TextTools.StartsRtl(txtQuick.Text) ? RightToLeft.Yes : RightToLeft.No; if (txtQuick.RightToLeft != want) txtQuick.RightToLeft = want; };
             var lq = new Label { Text = "Say now:", AutoSize = true, Anchor = AnchorStyles.Left, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
             var bq = SmallButton("Say  ▶", (s, e) => QuickSay());
             quick.Controls.Add(lq, 0, 0); quick.Controls.Add(txtQuick, 1, 0); quick.Controls.Add(bq, 2, 0);
-            var qnote = new Label { Text = "Type a sentence and press Enter — it is spoken right away (to the device chosen on the Mic tab). ↑ brings back the last one.", AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(3, 0, 3, 0) };
+            var qnote = new Label { Text = "Type a sentence and press Enter — it is spoken right away (to the device chosen on the Mic tab). ↑ ↓ go through what you said before.", AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(3, 0, 3, 0) };
             quick.Controls.Add(qnote, 0, 1); quick.SetColumnSpan(qnote, 3);
+            Control phead, pbuttons;
+            BuildPhrasePanels(out phead, out pbuttons);
             split.Panel1.Controls.Add(txt);
             split.Panel1.Controls.Add(edBar);
+            split.Panel1.Controls.Add(phead);
+            split.Panel1.Controls.Add(pbuttons);
             split.Panel1.Controls.Add(quick);
 
             // right: tabs
-            var tabs = new TabControl { Dock = DockStyle.Fill };
+            var tabs = new TabControl { Dock = DockStyle.Fill, Multiline = true };
             tabs.TabPages.Add(VoiceTab());
             tabs.TabPages.Add(SoundTab());
             tabs.TabPages.Add(ExportTab());
             tabs.TabPages.Add(MicTab());
             tabs.TabPages.Add(BotTab());
+            tabs.TabPages.Add(HistoryTab());
+            tabs.TabPages.Add(ShortcutsTab());
             tabs.TabPages.Add(TextTab());
             tabs.TabPages.Add(LogTab());
             split.Panel2.Padding = new Padding(0, 0, 6, 6);
@@ -301,7 +333,8 @@ namespace PiperStudio
             chkSplit = new CheckBox { Text = "One file per paragraph (name_001, name_002 …)", AutoSize = true };
             chkNoOverwrite = new CheckBox { Text = "Never overwrite — add (2), (3) … to the name", AutoSize = true, Checked = true };
             chkOpenAfter = new CheckBox { Text = "Open the folder when export finishes", AutoSize = true, Checked = true };
-            AddFull(g, chkSplit); AddFull(g, chkNoOverwrite); AddFull(g, chkOpenAfter);
+            chkSrt = new CheckBox { Text = "Also save subtitles (.srt) — timed sentence by sentence", AutoSize = true };
+            AddFull(g, chkSplit); AddFull(g, chkNoOverwrite); AddFull(g, chkOpenAfter); AddFull(g, chkSrt);
 
             var grp = new GroupBox { Text = "FFmpeg (needed for MP3 / OGG / FLAC / M4A)", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(6), Margin = new Padding(3, 12, 3, 3) };
             var gf = Grid(); gf.Padding = new Padding(0);
@@ -379,11 +412,36 @@ namespace PiperStudio
         {
             string t = txtQuick.Text;
             if (t.Trim().Length == 0) return;
-            if (busy) { SetStatus(Lang.T("Still speaking — press Esc to stop first.")); return; }
             lastQuick = t;
-            AddLog("Say: " + t);
-            if (PlayText(t, -1)) txtQuick.Clear();
+            SpeakNow(t, "say", null);
+            txtQuick.Clear();
             txtQuick.Focus();
+        }
+
+        // Everything that should be spoken right away goes through here: Say now, phrases, shortcuts, history.
+        // While something is still being spoken, new sentences wait their turn (Esc clears the queue).
+        class SpeakRequest { public string Text, Source; public List<int> Devices; }
+        readonly Queue<SpeakRequest> speakQueue = new Queue<SpeakRequest>();
+
+        void SpeakNow(string text, string source, List<int> devices)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            AddHistory(text, source);
+            AddLog((source == "phrase" ? "Phrase: " : source == "selection" ? "Read aloud: " : "Say: ") + (text.Length > 80 ? text.Substring(0, 80) + "…" : text));
+            if (busy)
+            {
+                speakQueue.Enqueue(new SpeakRequest { Text = text, Source = source, Devices = devices });
+                SetStatus(string.Format(Lang.T("Queued — {0} waiting. Esc stops."), speakQueue.Count));
+                return;
+            }
+            PlayText(text, -1, devices);
+        }
+
+        void SpeakNextQueued()
+        {
+            if (busy || speakQueue.Count == 0) return;
+            var r = speakQueue.Dequeue();
+            PlayText(r.Text, -1, r.Devices);
         }
 
         TabPage BotTab()
@@ -443,6 +501,7 @@ namespace PiperStudio
                     GetJob = () => (Job)Invoke(new Func<Job>(() => MakeJob(true))),
                     GetFfmpeg = () => (string)Invoke(new Func<string>(FindFfmpeg)),
                     Log = s => AddLog(s),
+                    Spoke = t => UI(() => AddHistory(t, "bot")),
                     OwnerClaimed = (id, name) => UI(() => { botOwner = id; botOwnerName = name; UpdateOwnerLabel(); SaveSettings(); }),
                     StateChanged = (on, msg) => UI(() =>
                     {
@@ -465,7 +524,7 @@ namespace PiperStudio
             chkNormalize = new CheckBox { Text = "Fix Arabic letters (ي → ی, ك → ک) and remove ـ", AutoSize = true, Checked = true };
             AddFull(top, chkNormalize);
             AddFull(top, new Label { Text = "Replacements — one per line, as  from=to", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(3, 10, 3, 2) });
-            AddFull(top, Note("Use it to fix pronunciation or expand abbreviations. Leave the right side empty to delete a word. Lines starting with # are ignored."));
+            AddFull(top, Note("Use it to fix pronunciation or expand abbreviations. Only whole words are changed. A rule written in lowercase matches any case (pixune → Pixune). Leave the right side empty to delete a word. Lines starting with # are ignored."));
             txtRepl = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Tahoma", 10f), AcceptsReturn = true };
             page.Controls.Add(txtRepl);
             page.Controls.Add(top);
@@ -574,7 +633,7 @@ namespace PiperStudio
         // ================================================================== voices
         IEnumerable<string> VoiceFolders()
         {
-            var l = new List<string> { appDir, Path.Combine(appDir, "voices") };
+            var l = new List<string> { appDir, Path.Combine(appDir, "voices"), AppPaths.In("voices") };
             if (!string.IsNullOrEmpty(runner.PiperExe))
             {
                 string pd = Path.GetDirectoryName(Path.GetFullPath(runner.PiperExe));
@@ -702,6 +761,7 @@ namespace PiperStudio
             progress.Visible = b;
             if (!b) progress.Value = 0;
             if (what != null) SetStatus(what);
+            if (!b && speakQueue.Count > 0) BeginInvoke(new Action(SpeakNextQueued));
         }
 
         void Play()
@@ -713,14 +773,14 @@ namespace PiperStudio
         }
 
         // offset < 0 = text is not from the editor (no highlighting)
-        bool PlayText(string text, int offset)
+        bool PlayText(string text, int offset, List<int> devices = null)
         {
             if (busy) return false;
             bool highlight = offset >= 0;
             var job = MakeJob(false); if (job == null) return false;
             var chunks = highlight ? TextTools.MakeChunks(text, offset) : TextTools.MakeSentences(text);
             currentQuick = !highlight;
-            var outIds = OutputIds();
+            var outIds = devices ?? OutputIds();
             bool useWaveOut = WaveOut.Available;
             int selStart = txt.SelectionStart, selLen = txt.SelectionLength;
             cts = new CancellationTokenSource(); var ct = cts.Token;
@@ -761,13 +821,11 @@ namespace PiperStudio
                         if (useWaveOut)
                             WaveOut.PlaySync(Audio.Resample(item.Value, job.Rate, 48000), 48000, outIds, ct);
                         else
-                            using (var ms = new MemoryStream(Audio.ToWav(item.Value, job.Rate)))
-                            {
-                                var p = new SoundPlayer(ms);
-                                player = p;
-                                p.PlaySync();
-                                player = null;
-                            }
+                        {
+                            // no Windows audio (test machines): just take as long as the sound would
+                            var until = DateTime.Now.AddSeconds(item.Value.Length / (double)job.Rate);
+                            while (DateTime.Now < until && !ct.IsCancellationRequested) Thread.Sleep(10);
+                        }
                         if (ct.IsCancellationRequested) break;
                     }
                 }
@@ -786,6 +844,7 @@ namespace PiperStudio
 
         void StopAll()
         {
+            speakQueue.Clear();
             if (cts != null) cts.Cancel();
             if (!currentQuick) runner.Kill(); // "Say now" sentences are short: let them finish so piper stays loaded
             var p = player; if (p != null) try { p.Stop(); } catch { }
@@ -795,7 +854,7 @@ namespace PiperStudio
         string OutDir()
         {
             string d = txtOutDir.Text.Trim();
-            if (d == "") d = Path.Combine(appDir, "Exports");
+            if (d == "") d = AppPaths.DefaultExportDir;
             return d;
         }
 
@@ -830,14 +889,14 @@ namespace PiperStudio
             return p;
         }
 
-        class ExportOptions { public string Folder, Ext, Ffmpeg, Bitrate; public bool Split, NoOverwrite; public int RateChoice; }
+        class ExportOptions { public string Folder, Ext, Ffmpeg, Bitrate; public bool Split, NoOverwrite, Srt; public int RateChoice; }
 
         ExportOptions GetExportOptions(bool quiet)
         {
             var o = new ExportOptions
             {
                 Folder = OutDir(), Ext = FormatExt(), Ffmpeg = FindFfmpeg(), Bitrate = cboBitrate.SelectedItem.ToString(),
-                Split = chkSplit.Checked, NoOverwrite = chkNoOverwrite.Checked, RateChoice = cboRate.SelectedIndex
+                Split = chkSplit.Checked, NoOverwrite = chkNoOverwrite.Checked, Srt = chkSrt.Checked, RateChoice = cboRate.SelectedIndex
             };
             if (o.Ext != ".wav" && o.Ffmpeg == null)
             {
@@ -886,31 +945,69 @@ namespace PiperStudio
             Task.Run(() =>
             {
                 var written = new List<string>();
-                int done = 0;
+                int done = 0, srtFiles = 0;
                 try
                 {
                     for (int f = 0; f < items.Count; f++)
                     {
                         var chunks = allChunks[f];
                         var pieces = new List<short[]>();
+                        var pieceCues = new List<List<Subtitles.Cue>>();
+                        double rate = job.Rate;
                         for (int i = 0; i < chunks.Count; i++)
                         {
                             ct.ThrowIfCancellationRequested();
                             int fi = f, ci = i;
                             UI(() => SetStatus(string.Format(Lang.T("Exporting{0}: paragraph {1} of {2}…"), items.Count > 1 ? " file " + (fi + 1) + "/" + items.Count : "", ci + 1, chunks.Count)));
-                            pieces.Add(Synth.Chunk(runner, chunks[i].Text, job, !opt.Split && i < chunks.Count - 1, ct));
+                            bool pause = !opt.Split && i < chunks.Count - 1;
+                            if (opt.Srt)
+                            {
+                                // sentence by sentence, so every subtitle line gets its exact time
+                                var parts = new List<short[]>();
+                                var cues = new List<Subtitles.Cue>();
+                                long at = 0;
+                                foreach (var sn in TextTools.MakeSentences(chunks[i].Text))
+                                {
+                                    var pcm = Synth.Chunk(runner, sn.Text, job, false, ct);
+                                    if (pcm.Length == 0) continue;
+                                    cues.Add(new Subtitles.Cue { Start = at / rate, End = (at + pcm.Length) / rate, Text = sn.Text });
+                                    parts.Add(pcm); at += pcm.Length;
+                                }
+                                if (pause) parts.Add(Audio.Silence(job.ParagraphPause, job.Rate));
+                                pieces.Add(Audio.Concat(parts));
+                                pieceCues.Add(cues);
+                            }
+                            else pieces.Add(Synth.Chunk(runner, chunks[i].Text, job, pause, ct));
                             done++; int dd = done;
                             UI(() => progress.Value = Math.Min(progress.Maximum, dd));
                         }
                         if (opt.Split)
                             for (int i = 0; i < pieces.Count; i++)
-                                written.Add(WriteAudio(pieces[i], job.Rate, opt, items[f].Key + "_" + (i + 1).ToString("000")));
+                            {
+                                string path = WriteAudio(pieces[i], job.Rate, opt, items[f].Key + "_" + (i + 1).ToString("000"));
+                                written.Add(path);
+                                if (opt.Srt && pieceCues[i].Count > 0) { Subtitles.Write(Path.ChangeExtension(path, ".srt"), Subtitles.MakeCues(pieceCues[i])); srtFiles++; }
+                            }
                         else
-                            written.Add(WriteAudio(Audio.Concat(pieces), job.Rate, opt, items[f].Key));
+                        {
+                            string path = WriteAudio(Audio.Concat(pieces), job.Rate, opt, items[f].Key);
+                            written.Add(path);
+                            if (opt.Srt)
+                            {
+                                var all = new List<Subtitles.Cue>();
+                                double offset = 0;
+                                for (int i = 0; i < pieces.Count; i++)
+                                {
+                                    foreach (var c in pieceCues[i]) all.Add(new Subtitles.Cue { Start = c.Start + offset, End = c.End + offset, Text = c.Text });
+                                    offset += pieces[i].Length / rate;
+                                }
+                                if (all.Count > 0) { Subtitles.Write(Path.ChangeExtension(path, ".srt"), Subtitles.MakeCues(all)); srtFiles++; }
+                            }
+                        }
                     }
                     UI(() =>
                     {
-                        SetBusy(false, string.Format(Lang.T("Exported {0} file(s) in {1:0.0}s → {2}"), written.Count, sw.Elapsed.TotalSeconds, written.Count == 1 ? written[0] : opt.Folder));
+                        SetBusy(false, string.Format(Lang.T("Exported {0} file(s) in {1:0.0}s → {2}"), written.Count, sw.Elapsed.TotalSeconds, written.Count == 1 ? written[0] : opt.Folder) + (srtFiles > 0 ? "  " + Lang.T("(+ subtitles)") : ""));
                         foreach (var w in written) AddLog("Saved: " + w);
                         if (openAfter && written.Count > 0) SelectInExplorer(written[0], written.Count == 1);
                     });
@@ -1052,6 +1149,46 @@ namespace PiperStudio
             numSentence.Value = 0.2m; numParagraph.Value = 0.5m;
         }
 
+        void ShowDiagnostics()
+        {
+            var ctx = new DiagContext
+            {
+                Runner = runner,
+                Version = Program.Version,
+                GetJob = () => (Job)Invoke(new Func<Job>(() => MakeJob(true))),
+                GetVoices = () => new List<VoiceInfo>(voices),
+                GetFfmpeg = () => (string)Invoke(new Func<string>(FindFfmpeg)),
+                GetOutDir = () => (string)Invoke(new Func<string>(OutDir)),
+                GetToken = () => (string)Invoke(new Func<string>(() => txtToken.Text.Trim())),
+                GetProxy = () => (string)Invoke(new Func<string>(() => txtProxy.Text.Trim())),
+                GetApiBase = () => Ini("botapi", "https://api.telegram.org"),
+                GetLogTail = () => (string)Invoke(new Func<string>(() => txtLog.Text)),
+                GetOutputIds = () => (List<int>)Invoke(new Func<List<int>>(OutputIds))
+            };
+            using (var f = new DiagnosticsForm(ctx)) f.ShowDialog(this);
+        }
+
+        TracksForm tracks;
+
+        void OpenTracks()
+        {
+            if (tracks != null && !tracks.IsDisposed) { tracks.WindowState = tracks.WindowState == FormWindowState.Minimized ? FormWindowState.Normal : tracks.WindowState; tracks.Activate(); return; }
+            var host = new TracksHost
+            {
+                Runner = runner,
+                GetJob = () => (Job)Invoke(new Func<Job>(() => MakeJob(true))),
+                GetFfmpeg = () => (string)Invoke(new Func<string>(FindFfmpeg)),
+                GetOutDir = () => (string)Invoke(new Func<string>(OutDir)),
+                GetEditorText = () => txt.SelectionLength > 0 ? txt.SelectedText : txt.Text,
+                Log = s => AddLog(s),
+                GetSetting = k => Ini(k, ""),
+                SetSetting = (k, v) => ini[k] = v
+            };
+            tracks = new TracksForm(host);
+            tracks.Show();
+            WarmUp();
+        }
+
         void SwitchLanguage(bool fa)
         {
             if (fa == Lang.Fa) return;
@@ -1071,6 +1208,9 @@ namespace PiperStudio
         {
             MessageBox.Show(this, Lang.Fa ? Lang.T("TIPS") :
                 "• F5 plays, Esc stops, Ctrl+E exports. Select text first to play/export only that part.\n\n" +
+                "• Quick phrases: click a phrase button (or press Ctrl+1 … 9) to say it at once. Right-click to edit; ＋ adds phrases and groups.\n\n" +
+                "• History tab: everything you said. Double-click to say it again. In Say now, ↑ / ↓ go through it.\n\n" +
+                "• Ctrl+Alt+Space reads the selected text aloud in any program (see the Shortcuts tab).\n\n" +
                 "• Each line is a paragraph. Export can make one file, or one file per paragraph.\n\n" +
                 "• Insert silence with [pause] (1 second) or [pause 2.5].\n\n" +
                 "• Persian: use a Persian voice (e.g. fa_IR-amir-medium). Typing in Finglish? Tick the Finglish box on the Voice tab.\n\n" +
@@ -1085,6 +1225,11 @@ namespace PiperStudio
         void OnKeyDown(object sender, KeyEventArgs e)
         {
             if (e.KeyCode == Keys.F5) { Play(); e.Handled = true; }
+            else if (e.Control && !e.Alt && !e.Shift && ((e.KeyCode >= Keys.D1 && e.KeyCode <= Keys.D9) || (e.KeyCode >= Keys.NumPad1 && e.KeyCode <= Keys.NumPad9)))
+            {
+                SpeakPhrase(e.KeyCode >= Keys.NumPad1 ? e.KeyCode - Keys.NumPad1 : e.KeyCode - Keys.D1);
+                e.Handled = true; e.SuppressKeyPress = true;
+            }
             else if (e.KeyCode == Keys.Escape && busy) { StopAll(); e.Handled = true; }
         }
 
@@ -1164,8 +1309,8 @@ namespace PiperStudio
         void ShowWelcome()
         {
             string msg = Lang.Fa
-                ? "به Piper Studio خوش آمدید!\n\nاین برنامه هر متنی را که بنویسید با صدای طبیعی می‌خواند. سه راه برای استفاده:\n\n۱. پخش و ذخیره: متن را در کادر بزرگ بنویسید، F5 برای شنیدن و Ctrl+E برای ذخیرهٔ فایل صوتی.\n\n۲. صحبت در تلگرام و تماس‌ها: در زبانهٔ «میکروفون» یک بار راه‌اندازی کنید، بعد در کادر «الان بگو» بنویسید و Enter بزنید.\n\n۳. ربات تلگرام: در زبانهٔ «ربات» ربات خودتان را بسازید و در هر چت بنویسید ‎@ربات جمله‎.\n\nصداها: یک صدای فارسی (amir) و یک صدای انگلیسی (ryan) همراه برنامه است. برای انتخاب، زبانهٔ «صدا» را ببینید.\n\nراهنمای کامل: فایل README-FA.txt در همین پوشه."
-                : "Welcome to Piper Studio!\n\nIt reads anything you type in a natural voice. Three ways to use it:\n\n1. Play & save: type in the big box, press F5 to listen and Ctrl+E to save an audio file.\n\n2. Talk in Telegram and calls: set up the Mic tab once, then type in \"Say now\" and press Enter.\n\n3. Telegram bot: create your own bot on the Bot tab, then type  @yourbot sentence  in any chat.\n\nVoices: a Persian voice (amir) and an English voice (ryan) are included — choose on the Voice tab.\n\nFull guide: README.txt in this folder.";
+                ? "به Piper Studio خوش آمدید!\n\nاین برنامه هر متنی را که بنویسید با صدای طبیعی می‌خواند. سه راه برای استفاده:\n\n۱. پخش و ذخیره: متن را در کادر بزرگ بنویسید، F5 برای شنیدن و Ctrl+E برای ذخیرهٔ فایل صوتی.\n\n۲. صحبت در تلگرام و تماس‌ها: در زبانهٔ «میکروفون» یک بار راه‌اندازی کنید، بعد در کادر «الان بگو» بنویسید و Enter بزنید.\n\n۳. ربات تلگرام: در زبانهٔ «ربات» ربات خودتان را بسازید و در هر چت بنویسید ‎@ربات جمله‎.\n\nجمله‌های آماده (زیر کادر متن) جمله‌های پرکاربرد را با یک کلیک یا Ctrl+1 تا 9 می‌گویند، و Ctrl+Alt+Space متن انتخاب‌شده را در هر برنامه‌ای بلند می‌خواند.\n\nصداها: یک صدای فارسی (amir) و یک صدای انگلیسی (ryan) همراه برنامه است. برای انتخاب، زبانهٔ «صدا» را ببینید.\n\nراهنمای کامل: فایل README-FA.txt در همین پوشه."
+                : "Welcome to Piper Studio!\n\nIt reads anything you type in a natural voice. Three ways to use it:\n\n1. Play & save: type in the big box, press F5 to listen and Ctrl+E to save an audio file.\n\n2. Talk in Telegram and calls: set up the Mic tab once, then type in \"Say now\" and press Enter.\n\n3. Telegram bot: create your own bot on the Bot tab, then type  @yourbot sentence  in any chat.\n\nQuick phrases (under the text box) say common sentences with one click or Ctrl+1 … 9, and Ctrl+Alt+Space reads selected text aloud in any program.\n\nVoices: a Persian voice (amir) and an English voice (ryan) are included — choose on the Voice tab.\n\nFull guide: README.txt in this folder.";
             MessageBox.Show(this, msg, "Piper Studio", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
@@ -1195,7 +1340,7 @@ namespace PiperStudio
             trkVolume.Value = Clamp(IniInt("volume", 100), trkVolume);
             numSentence.Value = Math.Min(numSentence.Maximum, IniDec("sentence", 0.2m));
             numParagraph.Value = Math.Min(numParagraph.Maximum, IniDec("paragraph", 0.5m));
-            txtOutDir.Text = Ini("outdir", Path.Combine(appDir, "Exports"));
+            txtOutDir.Text = Ini("outdir", AppPaths.DefaultExportDir);
             cboFormat.SelectedIndex = Math.Min(cboFormat.Items.Count - 1, IniInt("format", 0));
             cboBitrate.SelectedIndex = Math.Min(cboBitrate.Items.Count - 1, IniInt("bitrate", 2));
             cboRate.SelectedIndex = Math.Min(cboRate.Items.Count - 1, IniInt("rate", 0));
@@ -1207,11 +1352,14 @@ namespace PiperStudio
             cboDir.SelectedIndex = Math.Min(2, IniInt("direction", 0));
             SetTextSize((float)IniDec("fontsize", 13));
             RefreshDevices(Ini("device", ""));
-            txtToken.Text = Ini("bottoken", ""); txtProxy.Text = Ini("botproxy", "");
+            txtToken.Text = Secret.Unprotect(Ini("bottoken", "")); txtProxy.Text = Ini("botproxy", "");
             long.TryParse(Ini("botowner", "0"), out botOwner); botOwnerName = Ini("botownername", "");
             chkBotAuto.Checked = IniBool("botauto", false);
             UpdateOwnerLabel();
             chkMonitor.Checked = IniBool("monitor", true);
+            chkSrt.Checked = IniBool("srt", false);
+            chkHkSpeak.Checked = IniBool("hk_speak", true); chkHkShow.Checked = IniBool("hk_show", true); chkHkPhrases.Checked = IniBool("hk_phrases", false);
+            chkTray.Checked = IniBool("tray", false); chkSelToSpeakers.Checked = IniBool("seltospeakers", true);
             chkTopMost.Checked = IniBool("topmost", false);
             int w = IniInt("w", 0), h = IniInt("h", 0);
             if (w >= MinimumSize.Width && h >= MinimumSize.Height) Size = new Size(w, h);
@@ -1244,10 +1392,16 @@ namespace PiperStudio
             d["openafter"] = chkOpenAfter.Checked ? "1" : "0"; d["ffmpeg"] = txtFfmpeg.Text;
             d["normalize"] = chkNormalize.Checked ? "1" : "0"; d["direction"] = cboDir.SelectedIndex.ToString();
             d["fontsize"] = textFontSize.ToString(CultureInfo.InvariantCulture);
-            d["bottoken"] = txtToken.Text.Trim(); d["botproxy"] = txtProxy.Text.Trim(); d["botowner"] = botOwner.ToString(CultureInfo.InvariantCulture);
+            d["bottoken"] = Secret.Protect(txtToken.Text.Trim()); d["botproxy"] = txtProxy.Text.Trim(); d["botowner"] = botOwner.ToString(CultureInfo.InvariantCulture);
             d["botownername"] = botOwnerName; d["botauto"] = chkBotAuto.Checked ? "1" : "0";
             if (ini.ContainsKey("botapi")) d["botapi"] = ini["botapi"];
+            foreach (var kv in ini) if (kv.Key.StartsWith("tracks_")) d[kv.Key] = kv.Value;
             d["lang"] = langOverride ?? (Lang.Fa ? "fa" : "en");
+            d["srt"] = chkSrt.Checked ? "1" : "0";
+            d["hk_speak"] = chkHkSpeak.Checked ? "1" : "0"; d["hk_show"] = chkHkShow.Checked ? "1" : "0"; d["hk_phrases"] = chkHkPhrases.Checked ? "1" : "0";
+            d["tray"] = chkTray.Checked ? "1" : "0"; d["seltospeakers"] = chkSelToSpeakers.Checked ? "1" : "0";
+            d["keephistory"] = chkKeepHistory.Checked ? "1" : "0";
+            d["phrasecat"] = phraseCat.ToString(); d["phrasesopen"] = phrasesOpen ? "1" : "0";
             d["device"] = DeviceName(); d["monitor"] = chkMonitor.Checked ? "1" : "0"; d["topmost"] = chkTopMost.Checked ? "1" : "0";
             d["max"] = WindowState == FormWindowState.Maximized ? "1" : "0";
             if (WindowState == FormWindowState.Normal) { d["w"] = Width.ToString(); d["h"] = Height.ToString(); }

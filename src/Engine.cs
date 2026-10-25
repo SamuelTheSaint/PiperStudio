@@ -471,9 +471,41 @@ namespace PiperStudio
                 if (line.Trim().Length == 0 || line.TrimStart().StartsWith("#")) continue;
                 int eq = line.IndexOf('=');
                 if (eq <= 0) continue;
-                r.Add(new KeyValuePair<string, string>(line.Substring(0, eq), line.Substring(eq + 1)));
+                string from = line.Substring(0, eq).Trim(), to = line.Substring(eq + 1).Trim();
+                if (from.Length == 0) continue;
+                r.Add(new KeyValuePair<string, string>(from, to));
             }
             return r;
+        }
+
+        // Replacement rules match whole words only ("AI" doesn't touch "MAIN"), and use "smart case":
+        // a rule written in lowercase matches any case (pixune → Pixune, PIXUNE); a rule with capitals matches exactly.
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Regex> ruleCache = new System.Collections.Concurrent.ConcurrentDictionary<string, Regex>();
+
+        public static Regex RuleRegex(string from)
+        {
+            return ruleCache.GetOrAdd(from, f =>
+            {
+                string pat = Regex.Escape(f);
+                if (char.IsLetterOrDigit(f[0])) pat = @"(?<![\p{L}\p{N}\p{M}])" + pat;
+                if (char.IsLetterOrDigit(f[f.Length - 1])) pat = pat + @"(?![\p{L}\p{N}\p{M}])";
+                bool hasUpper = false;
+                foreach (char c in f) if (char.IsUpper(c)) { hasUpper = true; break; }
+                var opts = RegexOptions.CultureInvariant | (hasUpper ? RegexOptions.None : RegexOptions.IgnoreCase);
+                return new Regex(pat, opts);
+            });
+        }
+
+        public static string ApplyRules(string text, List<KeyValuePair<string, string>> rules)
+        {
+            if (rules == null) return text;
+            foreach (var kv in rules)
+            {
+                if (string.IsNullOrEmpty(kv.Key)) continue;
+                string to = kv.Value ?? "";
+                text = RuleRegex(kv.Key).Replace(text, m => to);
+            }
+            return text;
         }
 
         // [pause] = 1 s, [pause 2.5] = 2.5 s
@@ -527,7 +559,7 @@ namespace PiperStudio
         public static string Prepare(string text, Job job)
         {
             if (job.Normalize) text = TextTools.NormalizePersian(text);
-            foreach (var kv in job.Replacements) text = text.Replace(kv.Key, kv.Value);
+            text = TextTools.ApplyRules(text, job.Replacements);
             return text;
         }
 

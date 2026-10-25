@@ -23,6 +23,7 @@ namespace PiperStudio
         public Action<string> Log;
         public Action<long, string> OwnerClaimed;
         public Action<bool, string> StateChanged;
+        public Action<string> Spoke;     // text that was turned into a voice message (for the history)
         public string BotUsername = "";
 
         HttpClient http;
@@ -199,6 +200,7 @@ namespace PiperStudio
                 Call("sendChatAction", new Dictionary<string, string> { { "chat_id", chat.ToString() }, { "action", "record_voice" } }, ct);
                 string ogg = MakeVoice(text, ct);
                 try { SendVoice(chat, ogg, ct, false); } finally { try { File.Delete(ogg); } catch { } }
+                if (Spoke != null) Spoke(text);
             }
             catch (Exception ex) { if (!ct.IsCancellationRequested) L("Message error: " + Root(ex)); }
         }
@@ -242,6 +244,7 @@ namespace PiperStudio
                     string title = "🔊 " + (text.Length > 60 ? text.Substring(0, 60) + "…" : text);
                     string results = "[{\"type\":\"voice\",\"id\":" + J("v" + mine) + ",\"voice_file_id\":" + J(fileId) + ",\"title\":" + J(title) + "}]";
                     Answer(id, results, ct);
+                    if (Spoke != null) Spoke(text);
                     L(string.Format("Inline voice ready in {0:0.0}s: «{1}»", sw.Elapsed.TotalSeconds, text.Length > 50 ? text.Substring(0, 50) + "…" : text));
                 }
                 catch (Exception ex)
